@@ -1,0 +1,30 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local data and generated artifacts
+.data/
+/recordings/
+/model_weights/
+/models/
+*.wav
+*.mp3
+*.m4a
+
+# Frontend
+node_modules/
+extension/dist/
+extension/.vite/
+*.tsbuildinfo
+
+# Logs
+*.log

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+jobs:
+  backend:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Set up Python
+        run: uv python install 3.13
+      - name: Install backend dependencies
+        run: uv sync --all-groups
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Mypy
+        run: uv run mypy .
+      - name: Tests
+        run: uv run pytest
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: Install extension dependencies
+        working-directory: extension
+        run: npm ci
+      - name: Lint extension
+        working-directory: extension
+        run: npm run lint
+      - name: Typecheck extension
+        working-directory: extension
+        run: npm run typecheck
+      - name: Build extension
+        working-directory: extension
+        run: npm run build
+
