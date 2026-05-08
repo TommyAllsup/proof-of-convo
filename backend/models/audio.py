@@ -16,6 +16,7 @@ class SessionStart(BaseModel):
     chunk_ms: int = 200
     client_started_at_ms: float | None = None
     client_sent_at_ms: float | None = None
+    telemetry_enabled: bool = True
 
 
 class SessionStop(BaseModel):
@@ -51,6 +52,8 @@ class SessionStats(BaseModel):
     last_rms: float = 0.0
     last_peak: float = 0.0
     dump_path: str | None = None
+    telemetry_session_path: str | None = None
+    telemetry_chunks_path: str | None = None
 
 
 class ChunkAck(BaseModel):
@@ -72,6 +75,8 @@ class SessionAck(BaseModel):
     received_at_ms: float
     sample_rate: int
     dump_path: str | None = None
+    telemetry_session_path: str | None = None
+    telemetry_chunks_path: str | None = None
 
 
 class ErrorEvent(BaseModel):

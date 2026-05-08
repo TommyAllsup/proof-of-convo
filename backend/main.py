@@ -4,12 +4,14 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
+from backend.audio.consumer import EndpointingConsumer
 from backend.audio.frames import AudioPacketError, parse_audio_packet
 from backend.audio.manager import AudioStreamManager, now_ms
 from backend.config import settings
@@ -29,16 +31,21 @@ manager = AudioStreamManager(
     queue_max=settings.audio_queue_max,
     dump_dir=settings.audio_dump_dir,
     dump_seconds=settings.audio_dump_seconds,
+    telemetry_dir=settings.telemetry_dir,
+    telemetry_enabled=settings.telemetry_enabled,
 )
+audio_consumer = EndpointingConsumer(manager.queue, vad_provider_name=settings.vad_provider)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
+    audio_consumer.start()
     logger.info("backend_start host=%s port=%s", settings.host, settings.port)
     try:
         yield
     finally:
+        await audio_consumer.stop()
         manager.close_all()
         logger.info("backend_stop")
 
@@ -60,12 +67,30 @@ async def health() -> dict[str, Any]:
         "service": "proof-of-convo-backend",
         "active_sessions": len(manager.list_sessions()),
         "audio_queue_depth": manager.queue.qsize(),
+        "audio_consumer": asdict(audio_consumer.stats()),
     }
 
 
 @app.get("/api/sessions")
 async def sessions() -> dict[str, Any]:
     return {"sessions": [session.model_dump() for session in manager.list_sessions()]}
+
+
+@app.get("/api/audio/consumer")
+async def audio_consumer_status() -> dict[str, Any]:
+    return {
+        "stats": asdict(audio_consumer.stats()),
+        "recent_endpoint_events": [
+            {
+                "type": event.type,
+                "session_id": event.session_id,
+                "sequence": event.sequence,
+                "event_ms": event.event_ms,
+                "segment": asdict(event.segment) if event.segment is not None else None,
+            }
+            for event in audio_consumer.recent_events()
+        ],
+    }
 
 
 async def _send_error(websocket: WebSocket, message: str) -> None:
@@ -105,6 +130,8 @@ async def _handle_text_message(
             received_at_ms=received_at_ms,
             sample_rate=start.sample_rate,
             dump_path=stats.dump_path,
+            telemetry_session_path=stats.telemetry_session_path,
+            telemetry_chunks_path=stats.telemetry_chunks_path,
         )
         await websocket.send_text(ack.model_dump_json())
         return start.session_id
@@ -115,7 +142,7 @@ async def _handle_text_message(
         except ValidationError as exc:
             await _send_error(websocket, f"invalid session_stop: {exc}")
             return session_id
-        stop_stats = manager.stop_session(stop.session_id)
+        stop_stats = manager.stop_session(stop.session_id, reason=stop.reason)
         logger.info(
             "session_stop session_id=%s reason=%s total_chunks=%s dropped_chunks=%s",
             stop.session_id,
@@ -212,7 +239,7 @@ async def audio_websocket(websocket: WebSocket) -> None:
         pass
     finally:
         if session_id is not None:
-            manager.stop_session(session_id)
+            manager.stop_session(session_id, reason="websocket_disconnect")
         logger.info("audio_ws_disconnect client=%s session_id=%s", websocket.client, session_id)
 
 

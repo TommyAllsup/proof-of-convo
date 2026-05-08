@@ -37,7 +37,53 @@ Synthetic audio test:
 uv run send-test-audio --duration-s 5
 ```
 
+Capture telemetry baseline:
+
+```bash
+uv run analyze-telemetry --output docs/benchmarks/phase-2-capture-telemetry-baseline-2026-05-08.md
+```
+
 If `PROOF_AUDIO_DUMP_SECONDS=30`, debug WAV files are written under `.data/audio/`. These files are ignored by git.
+
+Telemetry is enabled by default. Per-session metadata is written to `.data/telemetry/*_session.json`,
+and chunk-level audio health metrics are written to `.data/telemetry/*_chunks.jsonl`. Set
+`PROOF_TELEMETRY_ENABLED=false` to disable backend telemetry globally, or turn off **Telemetry
+capture** in the extension settings to disable it for new capture sessions.
+
+The extension popup and sidebar include a **Consumer** panel that polls
+`/api/audio/consumer` from the configured backend URL. Use it to demonstrate Phase 2 queue
+consumption:
+
+```bash
+uv run backend
+uv run send-test-audio --duration-s 5
+```
+
+The panel should show consumed chunk count increasing, queue depth returning to `0`, and recent
+endpoint events appearing as the RMS endpoint detector observes speech.
+
+Phase 2 VAD provider selection:
+
+```bash
+PROOF_VAD_PROVIDER=rms uv run backend
+PROOF_VAD_PROVIDER=silero_onnx uv run backend
+```
+
+`rms` is the default baseline/fallback. `silero_onnx` uses `silero-vad[onnx-cpu]` and
+`onnxruntime` on 16 kHz mono PCM. The Consumer panel and `/health` expose the selected provider,
+latest Silero speech probability when available, and VAD error count.
+
+Replay benchmark:
+
+```bash
+uv run benchmark-vad --provider rms --provider silero_onnx \
+  --output docs/benchmarks/phase-2-vad-benchmark-2026-05-08.md \
+  --json-output docs/benchmarks/phase-2-vad-benchmark-2026-05-08.json
+```
+
+Latest local result on the MacBook: RMS processed 3879.20 s of captures in 0.22 s
+(RTF 0.0001), and Silero ONNX processed the same audio in 10.53 s (RTF 0.0027) with zero
+processing errors. See `docs/benchmarks/phase-2-vad-benchmark-2026-05-08.md`.
 
 ## Extension Quickstart
 

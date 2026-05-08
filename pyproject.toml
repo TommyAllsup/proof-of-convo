@@ -9,8 +9,10 @@ dependencies = [
   "langgraph>=0.2.0",
   "mlx>=0.26.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "numpy>=2.0.0",
+  "onnxruntime>=1.20.0",
   "pydantic>=2.8.0",
   "python-dotenv>=1.0.1",
+  "silero-vad[onnx-cpu]>=6.0.0",
   "sounddevice>=0.5.0",
   "uvicorn[standard]>=0.30.0",
   "websockets>=13.0",
@@ -27,8 +29,10 @@ dev = [
 
 [project.scripts]
 backend = "backend.main:run"
+analyze-telemetry = "scripts.analyze_telemetry:main"
 send-test-audio = "scripts.send_test_audio:main"
 check-audio-devices = "scripts.check_audio_devices:main"
+benchmark-vad = "scripts.benchmark_vad:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -56,4 +60,3 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-

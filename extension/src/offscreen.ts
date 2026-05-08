@@ -142,7 +142,8 @@ class CaptureController {
       sample_rate: 16_000,
       chunk_ms: 200,
       client_started_at_ms: this.captureStartedAtMs,
-      client_sent_at_ms: Date.now()
+      client_sent_at_ms: Date.now(),
+      telemetry_enabled: request.telemetryEnabled
     });
 
     const constraints = {

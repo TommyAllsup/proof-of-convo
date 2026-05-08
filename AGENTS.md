@@ -225,7 +225,29 @@ Build a **live, agentic AI participant** that can join and meaningfully contribu
    - Use Silero VAD (MLX or ONNX). Run continuously on audio stream.
    - Detect speech start → begin buffering.
    - Detect speech end (silence > 300–600 ms configurable) → finalize utterance and trigger STT.
+   - **Current required first step**: add a backend-managed consumer for `AudioStreamManager.queue`
+     before attaching any STT model. Verification on 2026-05-08 showed the existing backend can
+     reach the queue cap (`audio_queue_depth: 512`) when no consumer drains it. Capture remains
+     live because stale queued events are replaced, but Phase 2 inference will not see the full
+     stream until a consumer is running.
+   - Consumer implementation instructions:
+     - Own the consumer from the FastAPI lifespan in `backend.main`.
+     - Start it with `asyncio.create_task(...)` on backend startup and stop it cleanly on shutdown.
+     - Drain with `await manager.queue.get()` and call `manager.queue.task_done()` in a `finally`.
+     - Run `RmsEndpointDetector.process(event)` in the initial version.
+     - Publish endpoint events to a separate internal queue, ring buffer, or stats object.
+     - Do not run heavy STT inference in the drain loop; schedule model work separately so queue
+       draining stays real time.
+     - Track `consumed_chunks`, `endpoint_events`, `last_consumed_at_ms`, `processing_errors`, and
+       current queue depth.
+     - Expose consumer health in `/health` or a dedicated `/api/audio/consumer` endpoint.
+     - Add async tests for draining, endpoint emission, cancellation, and error recovery.
 3. **Streaming / Chunked STT**:
+   - **Current required next step after VAD integration**: build an offline STT benchmark and
+     utterance-window export path before attaching any STT model to live capture. Use Silero ONNX
+     endpoint events from the captured WAV sessions as the first handoff boundaries. Do not wire
+     live STT into `EndpointingConsumer` until the offline benchmark proves the selected model is
+     comfortably faster than real time and produces useful transcripts.
    - For MLX Whisper: Implement or adapt streaming inference (chunk with overlap, use previous context for better accuracy, or use libraries supporting Simul-Whisper / AlignAtt policy).
    - Emit partial transcripts every ~150–300 ms during speech + final on endpoint.
    - Post-process: punctuation, capitalization, speaker assignment.
@@ -434,7 +456,14 @@ Build a **live, agentic AI participant** that can join and meaningfully contribu
 7. When blocked or unsure, propose approach in discussion and reference specific sections of this doc.
 8. Upon completing a meaningful chunk: Update AGENTS.md, add ADR if decision was non-obvious, run full pipeline test, and share results (latency numbers, demo notes, lessons).
 
-**Current Priority (as of initial creation)**: Phase 0 + Phase 1 (get reliable audio flowing from Meet tab into backend) + basic VAD/STT POC in Phase 2. Voice injection and full agent brain can follow once the foundation is solid.
+**Current Priority (updated 2026-05-08)**: Phase 2A offline STT benchmark and utterance-window
+handoff.
+Phase 1 capture has passed real-session verification with zero sequence drops. The Phase 2 queue
+consumer, provider-neutral VAD layer, RMS baseline provider, Silero ONNX provider, live provider
+selection, Consumer panel fields, and replay VAD benchmark are implemented. Do not attach STT in the
+queue-drain loop. The next backend task is to export VAD-derived utterance windows from captured WAV
+sessions, benchmark local STT providers offline against those windows, and commit benchmark artifacts
+that justify the first live STT integration.
 
 ---
 
@@ -455,3 +484,143 @@ Let's build something remarkable. Start with small, verifiable wins in audio cap
 - Chose the MV3 capture architecture documented in `docs/adr-001-tab-capture-architecture.md`: user-gesture UI obtains a `chrome.tabCapture.getMediaStreamId()`, the service worker coordinates an offscreen document, the offscreen document owns Web Audio and streams PCM16 packets to the local backend.
 - Added `scripts/send_test_audio.py` so backend ingestion can be verified without Chrome or Google Meet.
 - Added initial CI and pre-commit gates for backend lint/typecheck/tests and extension lint/typecheck/build.
+
+### 2026-05-08: Phase 2 Verification and Queue Consumer Finding
+
+- Added capture telemetry analysis in `scripts/analyze_telemetry.py` and generated the baseline in `docs/benchmarks/phase-2-capture-telemetry-baseline-2026-05-08.md`.
+- Added deterministic RMS endpointing in `backend/audio/endpointing.py` as a baseline while benchmarking Silero/MLX VAD.
+- Verification gates passed: `uv run ruff check .`, `uv run mypy .`, `uv run pytest`, extension `npm run typecheck`, `npm run lint`, and `npm run build`.
+- Real captured sessions show zero sequence drops and low backend receive latency. See `docs/benchmarks/phase-2-verification-2026-05-08.md`.
+- Important operational finding: the running backend can report `audio_queue_depth: 512` because no Phase 2 consumer drains `AudioStreamManager.queue` yet. `send-test-audio` still succeeds with zero sequence drops because stale queued events are replaced, but live STT/VAD needs a consumer before model inference is attached.
+- Follow ADR `docs/adr-003-phase-2-stt-vad-benchmark-plan.md` for the next implementation pass.
+
+### 2026-05-08: Phase 2 Queue Consumer Implementation
+
+- Added `backend/audio/consumer.py` with `EndpointingConsumer`, a lifespan-owned async consumer that drains `AudioStreamManager.queue`.
+- The consumer runs `RmsEndpointDetector`, stores recent endpoint events, tracks health counters, and keeps processing after handler errors.
+- `backend.main` now starts the consumer on FastAPI startup, stops it on shutdown, includes consumer stats in `/health`, and exposes `/api/audio/consumer`.
+- Added tests for queue draining, endpoint event emission, cancellation, handler error recovery, and API health exposure.
+- Live smoke on `PROOF_BACKEND_PORT=8012` with `uv run send-test-audio --url ws://127.0.0.1:8012/ws/audio --duration-s 2` consumed all 10 chunks with `audio_queue_depth: 0`, `processing_errors: 0`, and ack-time `queued_chunks: 1`. This confirms the consumer resolves the prior saturated-queue condition for the synthetic stream.
+- Next Phase 2 step: replace or augment the RMS detector with Silero/MLX VAD, then run offline STT benchmarks on the captured WAV sessions before attaching model inference to the live endpoint event path.
+
+### 2026-05-08: Phase 2 VAD Benchmark Plan
+
+- Scope: VAD benchmark and live VAD demonstration only. Do not implement STT in this pass.
+- Defaults: run first on the MacBook, use Silero ONNX as the first real VAD provider, and keep RMS as the baseline/fallback provider.
+- Add a provider-neutral VAD interface with `name`, `process(AudioChunkEvent)`, `flush(session_id)`, and latest frame stats. Wrap the existing RMS endpointing behavior behind that interface.
+- Add Silero ONNX VAD with Python 3.13-compatible dependencies (`silero-vad[onnx-cpu]` and `onnxruntime`), configured by `PROOF_VAD_PROVIDER=silero_onnx`. Default remains `PROOF_VAD_PROVIDER=rms`.
+- Add `uv run benchmark-vad` to replay local `.data/audio/*_first_3600s.wav` captures and write Markdown/JSON benchmark reports comparing providers. Metrics must include duration, wall time, real-time factor, segment count, speech duration, speech ratio, starts per minute, segment duration stats, errors, and RMS comparison deltas.
+- Wire the configured VAD into `EndpointingConsumer`; do not run STT or other heavy model work in the queue-drain loop.
+- Extend `/health`, `/api/audio/consumer`, and the extension Consumer panel with VAD provider, last speech probability when available, and VAD processing error count.
+- Agent task breakdown:
+  - **VAD Abstraction Agent**: implement interface + RMS wrapper, preserving current endpoint behavior with tests.
+  - **Silero ONNX Agent**: add dependencies, implement 16 kHz mono PCM adapter, and add model import/load smoke coverage.
+  - **Replay Benchmark Agent**: implement `benchmark-vad`, stdlib WAV replay, Markdown/JSON output, and reports under `docs/benchmarks/`.
+  - **Live Wiring + GUI Agent**: add `PROOF_VAD_PROVIDER`, integrate selected provider into the consumer, update API responses and extension Consumer UI.
+  - **Documentation Agent**: update README, ADR 003, AGENTS.md, and benchmark notes with results and next STT handoff.
+- Required verification: `uv run ruff check .`, `uv run mypy .`, `uv run pytest`, `uv run benchmark-vad --provider rms --provider silero_onnx --output docs/benchmarks/phase-2-vad-benchmark-YYYY-MM-DD.md`, extension `npm run typecheck`, `npm run lint`, `npm run build`, and live smoke for both RMS and Silero ONNX providers.
+
+### 2026-05-08: Phase 2 VAD Benchmark and Live Integration
+
+- Added `backend/audio/vad.py` with a provider-neutral VAD protocol, latest frame stats, `RmsVadProvider`, `SileroOnnxVadProvider`, and `create_vad_provider`.
+- Preserved the current RMS endpoint behavior by wrapping `RmsEndpointDetector` rather than changing its thresholds or endpoint state machine.
+- Added Python 3.13-compatible Silero ONNX dependencies: `silero-vad[onnx-cpu]` and `onnxruntime`. The Silero provider buffers incoming 16 kHz PCM chunks into 512-sample model frames.
+- Added `PROOF_VAD_PROVIDER`, defaulting to `rms`; `silero_onnx` is opt-in.
+- Wired the configured provider into `EndpointingConsumer` and extended `/health`, `/api/audio/consumer`, and the extension Consumer panel with VAD provider, last speech probability, and VAD processing error count.
+- Added `uv run benchmark-vad` with Markdown and JSON output. The 2026-05-08 MacBook replay benchmark over 8 local `.data/audio/*_first_3600s.wav` captures processed 3879.20 s of audio:
+  - RMS: wall 0.22 s, RTF 0.0001, 365 segments, 2572.60 s speech, 66.32% speech ratio, 0 errors.
+  - Silero ONNX: wall 10.53 s, RTF 0.0027, 344 segments, 2582.53 s speech, 66.57% speech ratio, 0 errors.
+  - Silero emitted 21 fewer segments than RMS while adding 9.93 s total speech duration, which suggests fewer short splits and slightly longer endpoint padding.
+- Verification passed: `uv run ruff check .`, `uv run mypy .`, `uv run pytest`, `uv run benchmark-vad --provider rms --provider silero_onnx --output docs/benchmarks/phase-2-vad-benchmark-2026-05-08.md`, extension `npm run typecheck`, `npm run lint`, and `npm run build`.
+- Live smoke passed on temporary ports:
+  - `PROOF_VAD_PROVIDER=rms PROOF_BACKEND_PORT=8012 uv run backend` with `uv run send-test-audio --url ws://127.0.0.1:8012/ws/audio --duration-s 2`: 10 chunks consumed, queue depth 0, processing errors 0, VAD errors 0, provider `rms`.
+  - `PROOF_VAD_PROVIDER=silero_onnx PROOF_BACKEND_PORT=8013 uv run backend` with `uv run send-test-audio --url ws://127.0.0.1:8013/ws/audio --duration-s 2`: 10 chunks consumed, queue depth 0, processing errors 0, VAD errors 0, provider `silero_onnx`, speech probability exposed.
+  - `PROOF_VAD_PROVIDER=silero_onnx PROOF_BACKEND_PORT=8014 uv run backend` with a 150-chunk replay from `.data/audio/28b11907-34cb-4a7b-a1b9-35e5732ffd1e_first_3600s.wav`: 150 chunks consumed, queue depth 0, endpoint events 9, processing errors 0, VAD errors 0.
+- Next STT handoff: use VAD endpoint events to cut utterance windows for offline STT benchmarks first. Keep live queue draining lightweight and schedule any STT/model work outside `EndpointingConsumer._consume`.
+
+### 2026-05-08: Phase 2A Offline STT Benchmark Instructions
+
+Scope: offline STT benchmarking and artifact generation only. Do not implement live transcript
+streaming, diarization, extension transcript UI, agent brain logic, TTS, or audio injection in this
+pass.
+
+Goal: prove which STT path should receive live VAD endpoint windows by replaying existing
+`.data/audio/*_first_3600s.wav` captures through the selected VAD provider, cutting utterance windows,
+transcribing those windows offline, and recording latency/quality evidence.
+
+Required implementation:
+
+1. Add reusable utterance-window extraction, not one-off script logic.
+   - Create a small module such as `backend/audio/segments.py` or `backend/audio/stt_windows.py`.
+   - Input: 16 kHz mono PCM16 WAV files plus configured VAD provider.
+   - Output: structured windows with `session_id`, `source_wav`, `start_ms`, `end_ms`,
+     `duration_ms`, `start_sequence`, `end_sequence`, `vad_provider`, `peak`, `mean_rms`, and a
+     deterministic `window_id`.
+   - Include optional pre-roll/post-roll padding, defaulting conservatively to about 150 ms pre-roll
+     and 250 ms post-roll, clamped to file bounds.
+   - Export a JSONL manifest under `.data/stt/` or `docs/benchmarks/` for reproducibility.
+2. Add a provider-neutral STT interface.
+   - Create a module such as `backend/audio/stt.py`.
+   - Define a protocol with provider `name`, model/version metadata, and a `transcribe(window)`
+     method that returns text, confidence if available, language if available, wall time, and errors.
+   - Keep the interface usable by both offline scripts and future live workers.
+   - Do not make STT depend on FastAPI, the extension, or `EndpointingConsumer`.
+3. Implement the first local STT provider as an isolated adapter.
+   - Preferred first target: an MLX Whisper path using a `whisper-large-v3-turbo`-class model or a
+     smaller MLX Whisper model for initial smoke if the large model setup is slow.
+   - Record the exact package, model id, quantization, and machine used in the benchmark doc.
+   - Keep cloud STT as a later comparison adapter unless local setup is blocked.
+4. Add `uv run benchmark-stt`.
+   - Suggested arguments: `--vad-provider`, `--stt-provider`, `--input-glob`,
+     `--artifact-dir`, `--output`, `--json-output`, `--limit-segments`, and `--max-audio-minutes`.
+   - The script should produce:
+     - a machine-readable manifest of utterance windows,
+     - per-window transcript JSONL,
+     - a joined per-session transcript Markdown artifact,
+     - a benchmark Markdown summary under `docs/benchmarks/`.
+   - Report at minimum: input files, total audio duration, number of VAD windows, transcribed speech
+     duration, STT wall time, real-time factor, per-window p50/p95 wall time, empty transcript rate,
+     error count, model load time, model metadata, and machine metadata.
+5. Add focused tests.
+   - Test window extraction on synthetic WAV/audio chunks with known speech/silence boundaries.
+   - Test JSONL/Markdown artifact shape without requiring a heavy model.
+   - Test provider error handling with a fake STT provider.
+   - Heavy model tests should be explicit smoke commands, not default `pytest` requirements.
+6. Documentation and ADR requirements.
+   - Add `docs/adr-004-offline-stt-benchmark.md` once the provider choice and benchmark design are
+     implemented.
+   - Update README quickstart with the `benchmark-stt` command.
+   - Update this section with measured results and the next live STT integration decision.
+
+Agent task breakdown:
+
+- **Window Extraction Agent**: implement reusable VAD-to-window extraction, padding/clamping, JSONL
+  manifest output, and tests.
+- **STT Interface Agent**: add provider protocol, result schemas, fake provider tests, and model
+  metadata capture.
+- **Local STT Adapter Agent**: add the first MLX Whisper adapter and a small smoke path that can run
+  on a short segment before the full benchmark.
+- **Benchmark Script Agent**: implement `benchmark-stt`, transcript artifacts, metrics aggregation,
+  and Markdown/JSON reports.
+- **Documentation Agent**: add ADR 004, README command examples, benchmark results, and update
+  current priority after the benchmark lands.
+
+Required verification before live STT work:
+
+- `uv run ruff check .`
+- `uv run mypy .`
+- `uv run pytest`
+- `uv run benchmark-stt --vad-provider silero_onnx --stt-provider <provider> --limit-segments 20 --output docs/benchmarks/phase-2a-stt-smoke-YYYY-MM-DD.md`
+- Full local benchmark on the best available M4 machine:
+  `uv run benchmark-stt --vad-provider silero_onnx --stt-provider <provider> --output docs/benchmarks/phase-2a-stt-benchmark-YYYY-MM-DD.md --json-output docs/benchmarks/phase-2a-stt-benchmark-YYYY-MM-DD.json`
+
+Success criteria:
+
+- Window extraction is deterministic and does not change existing VAD live-consumer behavior.
+- The chosen STT provider runs faster than real time on captured utterance windows, with target
+  full-benchmark RTF below 0.70 and no sustained memory growth.
+- At least one joined transcript artifact is good enough for manual review of meeting content, even
+  before diarization is added.
+- Benchmark docs include enough metadata for another agent to reproduce the result.
+- The next live integration design is explicit: STT must run in a worker fed by endpoint events, not
+  in the queue-drain loop.

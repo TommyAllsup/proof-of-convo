@@ -2,10 +2,13 @@ import {
   Activity,
   AudioLines,
   CircleStop,
+  Database,
+  Radio,
   PanelRightOpen,
   Play,
   Settings2,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Waves
 } from "lucide-react";
 import * as React from "react";
 
@@ -15,6 +18,7 @@ import { Slider } from "../components/ui/slider";
 import { sendRuntimeMessage } from "./chrome";
 import { startCaptureFromCurrentTab, stopCapture } from "./capture";
 import type { ParticipationMode } from "./messages";
+import { useAudioConsumerStatus } from "./useAudioConsumerStatus";
 import { useRuntimeStatus } from "./useRuntimeStatus";
 import { useSettings } from "./useSettings";
 
@@ -31,6 +35,7 @@ const modeLabels: Record<ParticipationMode, string> = {
 export function ControlPanel({ surface }: ControlPanelProps) {
   const status = useRuntimeStatus();
   const { settings, updateSettings } = useSettings();
+  const consumer = useAudioConsumerStatus(settings.backendWsUrl);
   const [busy, setBusy] = React.useState(false);
   const [localError, setLocalError] = React.useState<string | undefined>();
 
@@ -124,6 +129,65 @@ export function ControlPanel({ surface }: ControlPanelProps) {
         </Card>
 
         <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Radio className="h-4 w-4 text-primary" />
+              Consumer
+            </div>
+            <div className={consumer.status?.stats.running ? "text-xs text-primary" : "text-xs text-muted-foreground"}>
+              {consumer.status?.stats.running ? "running" : "offline"}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Metric label="Consumed" value={formatCount(consumer.status?.stats.consumed_chunks)} />
+              <Metric label="Queue" value={formatCount(consumer.status?.stats.queue_depth ?? status.queuedChunks)} />
+              <Metric label="Events" value={formatCount(consumer.status?.stats.endpoint_events)} />
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Metric label="VAD" value={consumer.status?.stats.vad_provider ?? "--"} />
+              <Metric label="Speech p" value={formatNumber(consumer.status?.stats.last_speech_probability ?? undefined)} />
+              <Metric label="Last chunk" value={formatRelativeMs(consumer.status?.stats.last_consumed_at_ms)} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <Metric label="Errors" value={formatCount(consumer.status?.stats.processing_errors)} />
+              <Metric label="VAD errors" value={formatCount(consumer.status?.stats.vad_processing_errors)} />
+            </div>
+
+            <div className="rounded-md border border-border bg-background">
+              <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-xs font-medium">
+                <Waves className="h-3.5 w-3.5 text-primary" />
+                Recent endpoints
+              </div>
+              <div className="max-h-32 overflow-auto">
+                {consumer.status?.recent_endpoint_events.length ? (
+                  consumer.status.recent_endpoint_events
+                    .slice()
+                    .reverse()
+                    .slice(0, 6)
+                    .map((event) => (
+                      <div
+                        className="grid grid-cols-[88px_1fr_56px] gap-2 border-b border-border px-3 py-2 text-xs last:border-b-0"
+                        key={`${event.session_id}-${event.sequence}-${event.type}`}
+                      >
+                        <span className="font-medium">{event.type.replace("_", " ")}</span>
+                        <span className="truncate text-muted-foreground">{event.session_id.slice(0, 8)}</span>
+                        <span className="text-right text-muted-foreground">#{event.sequence}</span>
+                      </div>
+                    ))
+                ) : (
+                  <div className="px-3 py-3 text-xs text-muted-foreground">Waiting for endpoint events</div>
+                )}
+              </div>
+            </div>
+
+            <StatusLine text={consumer.error ?? consumer.status?.stats.last_error ?? consumer.endpointUrl} danger={Boolean(consumer.error || consumer.status?.stats.last_error)} />
+          </CardContent>
+        </Card>
+
+        <Card>
           <CardHeader className="flex flex-row items-center gap-2 text-sm font-medium">
             <Settings2 className="h-4 w-4 text-primary" />
             Agent Mode
@@ -159,6 +223,19 @@ export function ControlPanel({ surface }: ControlPanelProps) {
                 step={5}
                 value={settings.aggressiveness}
                 onChange={(event) => updateSettings({ aggressiveness: Number(event.currentTarget.value) })}
+              />
+            </label>
+
+            <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
+              <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Database className="h-3.5 w-3.5 text-primary" />
+                Telemetry capture
+              </span>
+              <input
+                className="h-4 w-4 accent-primary"
+                type="checkbox"
+                checked={settings.telemetryEnabled}
+                onChange={(event) => updateSettings({ telemetryEnabled: event.currentTarget.checked })}
               />
             </label>
           </CardContent>
@@ -202,3 +279,23 @@ function formatNumber(value: number | undefined): string {
   return value.toFixed(3);
 }
 
+function formatCount(value: number | undefined): string {
+  if (value == null) {
+    return "--";
+  }
+  return value.toLocaleString();
+}
+
+function formatRelativeMs(value: number | null | undefined): string {
+  if (value == null) {
+    return "--";
+  }
+  const ageMs = Date.now() - value;
+  if (ageMs < 1500) {
+    return "now";
+  }
+  if (ageMs < 60_000) {
+    return `${Math.round(ageMs / 1000)}s ago`;
+  }
+  return `${Math.round(ageMs / 60_000)}m ago`;
+}

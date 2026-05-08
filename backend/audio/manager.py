@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from backend.audio.frames import AudioPacket, audio_levels, pcm16_to_float32
+from backend.audio.telemetry import TelemetryWriter
 from backend.audio.wav_dump import WavDumpWriter
 from backend.models.audio import ChunkAck, SessionStart, SessionStats
 
@@ -24,7 +25,14 @@ class AudioChunkEvent:
 
 
 class AudioSession:
-    def __init__(self, start: SessionStart, dump_dir: Path, dump_seconds: int) -> None:
+    def __init__(
+        self,
+        start: SessionStart,
+        dump_dir: Path,
+        dump_seconds: int,
+        telemetry_dir: Path,
+        telemetry_enabled: bool,
+    ) -> None:
         started_at_ms = start.client_started_at_ms or now_ms()
         self.stats = SessionStats(
             session_id=start.session_id,
@@ -41,11 +49,22 @@ class AudioSession:
             dump_path = dump_dir / f"{safe_session}_first_{dump_seconds}s.wav"
             self.dump_writer = WavDumpWriter(dump_path, start.sample_rate, dump_seconds)
             self.stats.dump_path = str(dump_path)
+        self.telemetry_writer: TelemetryWriter | None = None
+        if telemetry_enabled and start.telemetry_enabled:
+            self.telemetry_writer = TelemetryWriter(start.session_id, telemetry_dir)
+            self.stats.telemetry_session_path = str(self.telemetry_writer.session_path)
+            self.stats.telemetry_chunks_path = str(self.telemetry_writer.chunks_path)
+            self.telemetry_writer.start(start, self.stats)
 
-    def ingest(self, packet: AudioPacket, received_at_ms: float) -> tuple[float, float]:
-        samples = pcm16_to_float32(packet.pcm16)
-        rms, peak = audio_levels(samples)
-
+    def ingest(
+        self,
+        packet: AudioPacket,
+        received_at_ms: float,
+        *,
+        queued_chunks: int,
+        rms: float,
+        peak: float,
+    ) -> tuple[float, float]:
         if self.stats.last_sequence is not None:
             gap = packet.sequence - self.stats.last_sequence - 1
             if gap > 0:
@@ -65,19 +84,46 @@ class AudioSession:
         if self.dump_writer is not None and packet.sample_rate == self.stats.sample_rate:
             self.dump_writer.write(packet.pcm16)
 
+        if self.telemetry_writer is not None:
+            self.telemetry_writer.write_chunk(
+                packet=packet,
+                received_at_ms=received_at_ms,
+                rms=rms,
+                peak=peak,
+                latency_ms=self.stats.last_latency_ms,
+                total_chunks=self.stats.total_chunks,
+                dropped_chunks=self.stats.dropped_chunks,
+                queued_chunks=queued_chunks,
+            )
+
         return rms, peak
 
-    def close(self) -> None:
+    def close(self, *, stopped_at_ms: float | None = None, reason: str | None = None) -> None:
         if self.dump_writer is not None:
             self.dump_writer.close()
+        if self.telemetry_writer is not None:
+            if stopped_at_ms is None:
+                self.telemetry_writer.close()
+            else:
+                self.telemetry_writer.stop(self.stats, stopped_at_ms=stopped_at_ms, reason=reason)
 
 
 class AudioStreamManager:
-    def __init__(self, *, queue_max: int, dump_dir: Path, dump_seconds: int) -> None:
+    def __init__(
+        self,
+        *,
+        queue_max: int,
+        dump_dir: Path,
+        dump_seconds: int,
+        telemetry_dir: Path | None = None,
+        telemetry_enabled: bool = True,
+    ) -> None:
         self._queue: asyncio.Queue[AudioChunkEvent] = asyncio.Queue(maxsize=queue_max)
         self._sessions: dict[str, AudioSession] = {}
         self._dump_dir = dump_dir
         self._dump_seconds = dump_seconds
+        self._telemetry_dir = telemetry_dir or dump_dir.parent / "telemetry"
+        self._telemetry_enabled = telemetry_enabled
 
     @property
     def queue(self) -> asyncio.Queue[AudioChunkEvent]:
@@ -86,9 +132,15 @@ class AudioStreamManager:
     def start_session(self, start: SessionStart) -> SessionStats:
         existing = self._sessions.pop(start.session_id, None)
         if existing is not None:
-            existing.close()
+            existing.close(stopped_at_ms=now_ms(), reason="session_replaced")
 
-        session = AudioSession(start, self._dump_dir, self._dump_seconds)
+        session = AudioSession(
+            start,
+            self._dump_dir,
+            self._dump_seconds,
+            self._telemetry_dir,
+            self._telemetry_enabled,
+        )
         self._sessions[start.session_id] = session
         return session.stats
 
@@ -107,7 +159,8 @@ class AudioStreamManager:
             self.start_session(start)
             session = self._sessions[session_id]
 
-        rms, peak = session.ingest(packet, received_at_ms)
+        samples = pcm16_to_float32(packet.pcm16)
+        rms, peak = audio_levels(samples)
         event = AudioChunkEvent(
             session_id=session_id,
             packet=packet,
@@ -121,7 +174,17 @@ class AudioStreamManager:
             # Phase 2 may not be attached yet. Keep capture live and reserve dropped_chunks for
             # real wire-level sequence gaps, not stale downstream events.
             _ = self._queue.get_nowait()
+            self._queue.task_done()
             self._queue.put_nowait(event)
+
+        queued_chunks = self._queue.qsize()
+        session.ingest(
+            packet,
+            received_at_ms,
+            queued_chunks=queued_chunks,
+            rms=rms,
+            peak=peak,
+        )
 
         return ChunkAck(
             session_id=session_id,
@@ -132,14 +195,14 @@ class AudioStreamManager:
             peak=peak,
             total_chunks=session.stats.total_chunks,
             dropped_chunks=session.stats.dropped_chunks,
-            queued_chunks=self._queue.qsize(),
+            queued_chunks=queued_chunks,
         )
 
-    def stop_session(self, session_id: str) -> SessionStats | None:
+    def stop_session(self, session_id: str, *, reason: str | None = None) -> SessionStats | None:
         session = self._sessions.pop(session_id, None)
         if session is None:
             return None
-        session.close()
+        session.close(stopped_at_ms=now_ms(), reason=reason)
         return session.stats
 
     def get_session(self, session_id: str) -> SessionStats | None:
@@ -151,5 +214,5 @@ class AudioStreamManager:
 
     def close_all(self) -> None:
         for session in self._sessions.values():
-            session.close()
+            session.close(stopped_at_ms=now_ms(), reason="backend_shutdown")
         self._sessions.clear()

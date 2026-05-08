@@ -4,6 +4,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -28,6 +32,9 @@ class Settings:
     audio_dump_dir: Path = Path(os.getenv("PROOF_AUDIO_DUMP_DIR", ".data/audio"))
     audio_dump_seconds: int = _env_int("PROOF_AUDIO_DUMP_SECONDS", 30)
     audio_queue_max: int = _env_int("PROOF_AUDIO_QUEUE_MAX", 512)
+    telemetry_enabled: bool = _env_bool("PROOF_TELEMETRY_ENABLED", True)
+    telemetry_dir: Path = Path(os.getenv("PROOF_TELEMETRY_DIR", ".data/telemetry"))
+    vad_provider: str = os.getenv("PROOF_VAD_PROVIDER", "rms")
 
 
 settings = Settings()

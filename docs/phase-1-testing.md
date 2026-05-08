@@ -13,6 +13,7 @@ Expected:
 - `send-test-audio` prints `session_ack`, periodic `chunk_ack`, and `session_stopped`.
 - Backend logs show audio chunks with non-zero RMS for the synthetic sine wave.
 - If `PROOF_AUDIO_DUMP_SECONDS` is greater than `0`, a WAV appears in `.data/audio/`.
+- If telemetry is enabled, session JSON and chunk JSONL files appear in `.data/telemetry/`.
 
 ## Chrome Extension Build Test
 
@@ -43,6 +44,8 @@ Expected:
 - The audio level meter moves with remote participant speech.
 - Latency stays below 150 ms for normal local networking.
 - Dropped chunk count remains `0`.
+- If **Telemetry capture** is enabled in the extension settings, `.data/telemetry/` contains a
+  session JSON file and chunk JSONL file for the session.
 - The Meet tab still plays remote audio locally because the offscreen document routes captured audio back to the tab audio output.
 
 ## Ten-Minute Soak Test
@@ -59,4 +62,3 @@ Record the result in `docs/benchmarks/phase-1-audio-capture-YYYY-MM-DD.md` with:
 - Median and p95 chunk latency from UI/backend logs.
 - Whether the optional first-30-second WAV is intelligible.
 - Any tab navigation, permission, or reconnect issues.
-

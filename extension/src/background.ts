@@ -110,7 +110,8 @@ async function startCaptureFromStreamId(
     sessionId,
     tabId,
     meetingUrl,
-    backendWsUrl: settings.backendWsUrl
+    backendWsUrl: settings.backendWsUrl,
+    telemetryEnabled: settings.telemetryEnabled
   });
 
   return status;
