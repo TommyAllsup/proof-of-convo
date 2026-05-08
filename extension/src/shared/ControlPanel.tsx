@@ -3,6 +3,7 @@ import {
   AudioLines,
   CircleStop,
   Database,
+  MessageSquareText,
   Radio,
   PanelRightOpen,
   Play,
@@ -21,6 +22,7 @@ import type { ParticipationMode } from "./messages";
 import { useAudioConsumerStatus } from "./useAudioConsumerStatus";
 import { useRuntimeStatus } from "./useRuntimeStatus";
 import { useSettings } from "./useSettings";
+import { useSttStatus } from "./useSttStatus";
 
 interface ControlPanelProps {
   surface: "popup" | "sidepanel";
@@ -36,6 +38,7 @@ export function ControlPanel({ surface }: ControlPanelProps) {
   const status = useRuntimeStatus();
   const { settings, updateSettings } = useSettings();
   const consumer = useAudioConsumerStatus(settings.backendWsUrl);
+  const stt = useSttStatus(settings.backendWsUrl);
   const [busy, setBusy] = React.useState(false);
   const [localError, setLocalError] = React.useState<string | undefined>();
 
@@ -125,6 +128,55 @@ export function ControlPanel({ surface }: ControlPanelProps) {
 
             <StatusLine text={status.meetingUrl ?? "No active Meet session"} />
             <StatusLine text={localError ?? status.error} danger />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <MessageSquareText className="h-4 w-4 text-primary" />
+              Transcript
+            </div>
+            <div className={stt.status?.stats.running ? "text-xs text-primary" : "text-xs text-muted-foreground"}>
+              {stt.status?.stats.running ? "running" : stt.status?.stats.enabled ? "enabled" : "disabled"}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Metric label="Done" value={formatCount(stt.status?.stats.completed_transcripts)} />
+              <Metric label="Queued" value={formatCount(stt.status?.stats.queued_jobs)} />
+              <Metric label="Errors" value={formatCount(stt.status?.stats.processing_errors)} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <Metric label="STT" value={stt.status?.stats.provider ?? "--"} />
+              <Metric label="Speaker" value="heuristic" />
+            </div>
+
+            <div className="rounded-md border border-border bg-background">
+              <div className="border-b border-border px-3 py-2 text-xs font-medium">Recent utterances</div>
+              <div className="max-h-52 overflow-auto">
+                {stt.status?.recent_transcripts.length ? (
+                  stt.status.recent_transcripts
+                    .slice()
+                    .reverse()
+                    .slice(0, surface === "popup" ? 4 : 10)
+                    .map((item) => (
+                      <div className="border-b border-border px-3 py-2 last:border-b-0" key={item.utterance.utterance_id}>
+                        <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                          <span className="font-medium text-foreground">{item.utterance.speaker}</span>
+                          <span>{formatTranscriptTime(item.utterance.start_ms)}</span>
+                        </div>
+                        <p className="text-xs leading-5 text-foreground">{item.utterance.text || "[empty]"}</p>
+                      </div>
+                    ))
+                ) : (
+                  <div className="px-3 py-3 text-xs text-muted-foreground">Waiting for final transcripts</div>
+                )}
+              </div>
+            </div>
+
+            <StatusLine text={stt.error ?? stt.status?.stats.last_error ?? stt.endpointUrl} danger={Boolean(stt.error || stt.status?.stats.last_error)} />
           </CardContent>
         </Card>
 
@@ -298,4 +350,18 @@ function formatRelativeMs(value: number | null | undefined): string {
     return `${Math.round(ageMs / 1000)}s ago`;
   }
   return `${Math.round(ageMs / 60_000)}m ago`;
+}
+
+function formatTranscriptTime(valueMs: number): string {
+  if (valueMs > 1_000_000_000_000) {
+    return new Date(valueMs).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  }
+  const totalSeconds = Math.max(0, Math.floor(valueMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }

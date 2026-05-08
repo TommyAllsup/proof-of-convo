@@ -55,6 +55,66 @@ export interface AudioConsumerStatus {
   recent_endpoint_events: AudioConsumerEndpointEvent[];
 }
 
+export interface SttWorkerStats {
+  enabled: boolean;
+  running: boolean;
+  provider: string;
+  model_id: string;
+  model_load_time_s: number | null;
+  queued_jobs: number;
+  enqueued_jobs: number;
+  dropped_jobs: number;
+  completed_transcripts: number;
+  processing_errors: number;
+  last_completed_at_ms: number | null;
+  last_error: string | null;
+  recent_transcripts: number;
+}
+
+export interface UtteranceEvent {
+  type: "utterance";
+  utterance_id: string;
+  session_id: string;
+  speaker: string;
+  start_ts: number;
+  end_ts: number;
+  start_ms: number;
+  end_ms: number;
+  text: string;
+  is_final: boolean;
+  confidence: number | null;
+  speaker_confidence: number | null;
+  stt_provider: string;
+  stt_model: string;
+  vad_provider: string;
+  raw_audio_ref: string | null;
+}
+
+export interface SttTranscriptItem {
+  completed_at_ms: number;
+  utterance: UtteranceEvent;
+  speaker: {
+    speaker: string;
+    confidence: number;
+    method: string;
+  };
+  transcript: {
+    window_id: string;
+    provider: string;
+    model_id: string;
+    text: string;
+    language: string | null;
+    confidence: number | null;
+    wall_time_s: number;
+    error: string | null;
+  };
+}
+
+export interface SttStatus {
+  stats: SttWorkerStats;
+  recent_transcripts: SttTranscriptItem[];
+}
+
 export interface UiSettings {
   backendWsUrl: string;
   participationMode: ParticipationMode;

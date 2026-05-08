@@ -456,14 +456,16 @@ Build a **live, agentic AI participant** that can join and meaningfully contribu
 7. When blocked or unsure, propose approach in discussion and reference specific sections of this doc.
 8. Upon completing a meaningful chunk: Update AGENTS.md, add ADR if decision was non-obvious, run full pipeline test, and share results (latency numbers, demo notes, lessons).
 
-**Current Priority (updated 2026-05-08)**: Phase 2A offline STT benchmark and utterance-window
-handoff.
+**Current Priority (updated 2026-05-08)**: Phase 3 realistic voice synthesis and injection, with
+Phase 2 model-quality refinement continuing in parallel.
 Phase 1 capture has passed real-session verification with zero sequence drops. The Phase 2 queue
 consumer, provider-neutral VAD layer, RMS baseline provider, Silero ONNX provider, live provider
-selection, Consumer panel fields, and replay VAD benchmark are implemented. Do not attach STT in the
-queue-drain loop. The next backend task is to export VAD-derived utterance windows from captured WAV
-sessions, benchmark local STT providers offline against those windows, and commit benchmark artifacts
-that justify the first live STT integration.
+selection, Consumer panel fields, replay VAD benchmark, VAD-derived utterance-window export, STT
+provider interface, `mlx_whisper` adapter, `benchmark-stt` artifact path, large-v3-turbo benchmark,
+separate live STT worker, structured `Utterance` schema, heuristic speaker attribution, `/api/stt`
+recent transcript publishing, and extension transcript UI are implemented. Do not attach STT in the
+queue-drain loop. The next major POC phase is voice synthesis/injection; a later Phase 2 refinement
+should replace heuristic speaker attribution with a real diarization model.
 
 ---
 
@@ -587,8 +589,9 @@ Required implementation:
    - Test provider error handling with a fake STT provider.
    - Heavy model tests should be explicit smoke commands, not default `pytest` requirements.
 6. Documentation and ADR requirements.
-   - Add `docs/adr-004-offline-stt-benchmark.md` once the provider choice and benchmark design are
-     implemented.
+   - Use `docs/adr-004-offline-stt-benchmark-plan.md` as the controlling plan for this pass.
+   - When the provider choice and benchmark results land, either update ADR 004 to `Accepted` or
+     add a follow-on provider-selection ADR.
    - Update README quickstart with the `benchmark-stt` command.
    - Update this section with measured results and the next live STT integration decision.
 
@@ -624,3 +627,85 @@ Success criteria:
 - Benchmark docs include enough metadata for another agent to reproduce the result.
 - The next live integration design is explicit: STT must run in a worker fed by endpoint events, not
   in the queue-drain loop.
+
+### 2026-05-08: Phase 2A Offline STT Benchmark Implementation
+
+- Added `backend/audio/stt_windows.py` for deterministic VAD-to-utterance-window extraction from
+  16 kHz mono PCM16 WAV captures, including pre-roll/post-roll padding and JSONL manifest export.
+- Added `backend/audio/stt.py` with a provider-neutral STT interface, fake deterministic provider,
+  and `mlx_whisper` adapter. Heavy model-backed tests are not part of default `pytest`.
+- Added `uv run benchmark-stt` in `scripts/benchmark_stt.py`. It writes utterance-window JSONL,
+  transcript JSONL, joined per-session transcript Markdown, and Markdown/JSON benchmark summaries.
+- Added `mlx-whisper` as the first local STT dependency.
+- Added tests for window extraction, STT providers, and benchmark artifact generation.
+- Verification passed: `uv run ruff check .`, `uv run mypy .`, and `uv run pytest` with 21 tests.
+- Benchmark artifacts:
+  - Fake artifact smoke: `docs/benchmarks/phase-2a-stt-fake-smoke-2026-05-08.md`.
+  - MLX tiny RMS one-window smoke: `docs/benchmarks/phase-2a-stt-mlx-tiny-smoke-2026-05-08.md`.
+  - MLX tiny Silero one-window smoke:
+    `docs/benchmarks/phase-2a-stt-silero-mlx-tiny-smoke-2026-05-08.md`.
+  - MLX tiny Silero 20-window smoke:
+    `docs/benchmarks/phase-2a-stt-silero-mlx-tiny-20-2026-05-08.md`, 20 windows, 85.46 s speech,
+    0.69 s model load time, 2.47 s STT wall time, RTF 0.0289, 0 errors.
+  - Full MLX tiny Silero benchmark:
+    `docs/benchmarks/phase-2a-stt-silero-mlx-tiny-full-2026-05-08.md`, 8 files, 344 windows,
+    2719.80 s speech, 0.69 s model load time, 34.09 s STT wall time, RTF 0.0125, 11.63% empty
+    transcript rate, 0 errors.
+- Next Phase 2B step: benchmark the intended `whisper-large-v3-turbo`-class MLX model or a documented
+  replacement for quality, then implement live STT as a separate worker fed by endpoint events.
+
+### 2026-05-08: Phase 2B Production STT Model and Live Worker
+
+- Selected `mlx_whisper` with `mlx-community/whisper-large-v3-turbo` as the first live STT provider.
+  Keep `mlx-community/whisper-tiny` for smoke tests and cheap artifact validation.
+- Added `backend/audio/live_stt.py` with `AudioWindowBuffer` and `LiveSttOrchestrator`. It buffers
+  recent PCM chunks, converts finalized endpoint events into STT jobs, runs STT in a separate async
+  worker, and stores recent transcript results.
+- Extended `EndpointingConsumer` with a lightweight `chunk_handler` so live STT can observe chunks
+  without doing model work in the queue-drain loop.
+- Wired the live worker into `backend.main` lifespan. `/health` now includes `stt_worker`, and
+  `/api/stt` exposes worker stats and recent transcripts.
+- Added live STT config in `backend/config.py` and `.env.example`. STT remains disabled by default
+  with `PROOF_STT_ENABLED=false`.
+- Extended the STT provider interface with `prepare()` and `transcribe_audio(...)` for live PCM jobs.
+- Benchmark artifacts:
+  - Large-v3-turbo one-window smoke:
+    `docs/benchmarks/phase-2b-stt-silero-mlx-large-v3-turbo-smoke-2026-05-08.md`, 22.23 s speech,
+    20.83 s initial model load, 1.61 s STT wall time, RTF 0.0723, 0 errors.
+  - Large-v3-turbo 20-window benchmark:
+    `docs/benchmarks/phase-2b-stt-silero-mlx-large-v3-turbo-20-2026-05-08.md`, 85.46 s speech,
+    0.94 s cached model load, 19.07 s STT wall time, RTF 0.2231, 0 empty transcripts, 0 errors.
+- Verification passed: `uv run ruff check .`, `uv run mypy .`, and `uv run pytest` with 22 tests.
+- Backend smoke passed with `PROOF_STT_ENABLED=true PROOF_STT_PROVIDER=fake` on port 8020; `/health`
+  and `/api/stt` reported a running fake STT worker with zero queued jobs/errors.
+- Full-stack WebSocket smoke passed on port 8021 with synthetic speech plus trailing silence:
+  `/api/stt` reported 1 enqueued job, 1 completed transcript, 0 processing errors, and a recent fake
+  transcript for the finalized RMS endpoint window.
+- Production-provider WebSocket replay smoke passed on port 8024 with `mlx-community/whisper-large-v3-turbo`
+  and Silero ONNX over a 30-second captured WAV: `/api/stt` reported 1 enqueued job, 1 completed
+  transcript, 0 processing errors, 0.91 s model load time, 1.19 s STT wall time, `speaker=Speaker_1`,
+  and non-empty transcript text.
+- Next Phase 2C step: add speaker attribution/diarization and stream final transcript events to the
+  extension UI.
+
+### 2026-05-08: Phase 2C Speaker-Attributed Transcript Publishing
+
+- Added `Utterance` Pydantic schema in `backend/models/audio.py` with timing, speaker, transcript,
+  confidence, STT, VAD, and raw audio reference fields.
+- Added `backend/audio/diarization.py` with a replaceable `HeuristicSpeakerDiarizer`. It provides
+  approximate per-session `Speaker_N` labels until a real online diarization model is integrated.
+- Updated `LiveSttOrchestrator` so every completed STT job produces a speaker attribution and final
+  `Utterance` record.
+- `/api/stt` now returns recent transcript items with `utterance`, `speaker`, raw STT result, and
+  window metadata.
+- Added extension STT polling (`useSttStatus`), TypeScript STT/utterance types, and a Transcript card
+  that shows recent speaker-attributed utterances in popup/sidebar.
+- Verification passed: `uv run ruff check .`, `uv run mypy .`, `uv run pytest` with 23 tests,
+  extension `npm run typecheck`, `npm run lint`, and `npm run build`.
+- Full-stack WebSocket smoke passed on port 8022 with fake STT; `/api/stt` returned one recent
+  `utterance` with `speaker=Speaker_1`, `stt_provider=fake`, and 0 processing errors.
+- Production-provider WebSocket replay smoke passed on port 8024 with large-v3-turbo and Silero ONNX;
+  `/api/stt` returned one final speaker-attributed utterance with non-empty transcript text and
+  0 processing errors.
+- Phase 2 is now complete for the POC plumbing. Remaining improvement is model-quality refinement:
+  replace heuristic speaker attribution with Sortformer or speaker-embedding diarization.

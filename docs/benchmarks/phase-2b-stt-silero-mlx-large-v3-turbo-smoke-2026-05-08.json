@@ -1,0 +1,52 @@
+{
+  "artifacts": {
+    "artifact_dir": ".data/stt/silero-mlx-large-v3-turbo-smoke",
+    "joined_transcripts": [
+      ".data/stt/silero-mlx-large-v3-turbo-smoke/0a764bab-00c0-41e8-986f-cdfd434b3509_first_30s-transcript.md"
+    ],
+    "transcripts_jsonl": ".data/stt/silero-mlx-large-v3-turbo-smoke/transcripts.jsonl",
+    "windows_jsonl": ".data/stt/silero-mlx-large-v3-turbo-smoke/utterance-windows.jsonl"
+  },
+  "extraction_wall_time_s": 0.17221033293753862,
+  "generated_at": "2026-05-08T18:35:43.653295+00:00",
+  "input_files": [
+    ".data/audio/0a764bab-00c0-41e8-986f-cdfd434b3509_first_30s.wav"
+  ],
+  "machine": {
+    "machine": "arm64",
+    "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "python": "3.13.12"
+  },
+  "model": {
+    "model_id": "mlx-community/whisper-large-v3-turbo",
+    "package": "mlx-whisper",
+    "package_version": "0.4.3",
+    "provider": "mlx_whisper",
+    "quantization": null
+  },
+  "settings": {
+    "chunk_ms": 200,
+    "limit_segments": 1,
+    "max_audio_minutes": null,
+    "post_roll_ms": 250.0,
+    "pre_roll_ms": 150.0
+  },
+  "summary": {
+    "artifact_dir": ".data/stt/silero-mlx-large-v3-turbo-smoke",
+    "empty_transcript_rate": 0.0,
+    "error_count": 0,
+    "files": 1,
+    "model_id": "mlx-community/whisper-large-v3-turbo",
+    "model_load_time_s": 20.826238250127062,
+    "real_time_factor": 0.07225985439772745,
+    "source_audio_duration_s": 30.0,
+    "stt_provider": "mlx_whisper",
+    "stt_wall_time_s": 1.6064810829702765,
+    "transcribed_speech_duration_s": 22.232,
+    "utterance_windows": 1,
+    "vad_provider": "silero_onnx",
+    "window_wall_p50_s": 1.606036958983168,
+    "window_wall_p95_s": 1.606036958983168
+  }
+}

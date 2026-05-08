@@ -83,3 +83,22 @@ class ErrorEvent(BaseModel):
     type: Literal["error"] = "error"
     message: str
     received_at_ms: float
+
+
+class Utterance(BaseModel):
+    type: Literal["utterance"] = "utterance"
+    utterance_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    speaker: str = Field(min_length=1)
+    start_ts: float
+    end_ts: float
+    start_ms: float
+    end_ms: float
+    text: str
+    is_final: bool = True
+    confidence: float | None = None
+    speaker_confidence: float | None = None
+    stt_provider: str
+    stt_model: str
+    vad_provider: str
+    raw_audio_ref: str | None = None

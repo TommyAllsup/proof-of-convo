@@ -78,6 +78,7 @@ class _SileroSession:
     triggered: bool = False
     temp_end: int = 0
     current_sample: int = 0
+    stream_started_at_ms: float | None = None
     open_start_ms: float | None = None
     open_start_sequence: int | None = None
     last_voice_ms: float | None = None
@@ -125,6 +126,9 @@ class SileroOnnxVadProvider:
             )
             self._sessions[event.session_id] = state
 
+        if state.stream_started_at_ms is None:
+            state.stream_started_at_ms = event.packet.chunk_started_at_ms
+
         samples = pcm16_to_float32(event.packet.pcm16)
         pending = state.pending if state.pending is not None else np.array([], dtype=np.float32)
         state.pending = np.concatenate((pending, samples.astype(np.float32, copy=False)))
@@ -138,9 +142,7 @@ class SileroOnnxVadProvider:
             if not result:
                 continue
             if "start" in result:
-                start_ms = event.packet.capture_started_at_ms + (
-                    float(result["start"]) * 1000.0 / 16000.0
-                )
+                start_ms = _sample_offset_to_ms(state, result["start"])
                 state.open_start_ms = start_ms
                 state.open_start_sequence = event.packet.sequence
                 state.last_voice_ms = event.packet.chunk_started_at_ms + event.packet.duration_ms
@@ -158,9 +160,7 @@ class SileroOnnxVadProvider:
                     )
                 )
             elif "end" in result:
-                end_ms = event.packet.capture_started_at_ms + (
-                    float(result["end"]) * 1000.0 / 16000.0
-                )
+                end_ms = _sample_offset_to_ms(state, result["end"])
                 segment = self._close(event.session_id, end_ms=end_ms)
                 if segment is not None:
                     emitted.append(
@@ -270,3 +270,9 @@ def create_vad_provider(name: str) -> VadProvider:
     if normalized == "silero_onnx":
         return SileroOnnxVadProvider()
     raise ValueError(f"unsupported VAD provider: {name}")
+
+
+def _sample_offset_to_ms(state: _SileroSession, sample_offset: int) -> float:
+    if state.stream_started_at_ms is None:
+        return float(sample_offset) * 1000.0 / state.sampling_rate
+    return state.stream_started_at_ms + (float(sample_offset) * 1000.0 / state.sampling_rate)

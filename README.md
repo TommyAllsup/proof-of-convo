@@ -85,6 +85,50 @@ Latest local result on the MacBook: RMS processed 3879.20 s of captures in 0.22 
 (RTF 0.0001), and Silero ONNX processed the same audio in 10.53 s (RTF 0.0027) with zero
 processing errors. See `docs/benchmarks/phase-2-vad-benchmark-2026-05-08.md`.
 
+Phase 2A offline STT benchmark:
+
+```bash
+uv run benchmark-stt --vad-provider silero_onnx \
+  --stt-provider mlx_whisper \
+  --model-id mlx-community/whisper-tiny \
+  --limit-segments 20 \
+  --artifact-dir .data/stt/silero-mlx-tiny-20 \
+  --output docs/benchmarks/phase-2a-stt-silero-mlx-tiny-20-2026-05-08.md \
+  --json-output docs/benchmarks/phase-2a-stt-silero-mlx-tiny-20-2026-05-08.json
+```
+
+The command exports VAD-derived utterance windows, per-window transcript JSONL, joined per-session
+transcript Markdown, and a benchmark summary. The full local tiny-model benchmark over 8 captures
+processed 344 Silero windows and 2719.80 s of speech with 0.69 s model load time and 34.09 s STT
+wall time (RTF 0.0125), with zero provider errors. See
+`docs/benchmarks/phase-2a-stt-silero-mlx-tiny-full-2026-05-08.md`.
+
+Phase 2B live STT worker:
+
+```bash
+PROOF_VAD_PROVIDER=silero_onnx \
+PROOF_STT_ENABLED=true \
+PROOF_STT_PROVIDER=mlx_whisper \
+PROOF_STT_MODEL=mlx-community/whisper-large-v3-turbo \
+uv run backend
+```
+
+The live worker buffers recent PCM chunks, receives finalized VAD endpoint events, and runs STT in a
+separate async worker so model inference never blocks `EndpointingConsumer`. Recent transcripts are
+published as final `utterance` records with `Speaker_N` labels from the current heuristic acoustic
+diarizer. Worker health and recent utterances are exposed at:
+
+```bash
+curl http://127.0.0.1:8000/api/stt
+```
+
+`PROOF_STT_ENABLED=false` remains the default. The Phase 2B large-v3-turbo benchmark over 20 Silero
+windows processed 85.46 s of speech in 19.07 s STT wall time (RTF 0.2231), with zero errors and zero
+empty transcripts. See `docs/benchmarks/phase-2b-stt-silero-mlx-large-v3-turbo-20-2026-05-08.md`.
+
+The extension popup and sidebar poll `/api/stt` and show the recent speaker-attributed transcript
+feed when STT is enabled.
+
 ## Extension Quickstart
 
 ```bash

@@ -1,0 +1,59 @@
+{
+  "artifacts": {
+    "artifact_dir": ".data/stt/silero-mlx-large-v3-turbo-20",
+    "joined_transcripts": [
+      ".data/stt/silero-mlx-large-v3-turbo-20/28b11907-34cb-4a7b-a1b9-35e5732ffd1e_first_3600s-transcript.md"
+    ],
+    "transcripts_jsonl": ".data/stt/silero-mlx-large-v3-turbo-20/transcripts.jsonl",
+    "windows_jsonl": ".data/stt/silero-mlx-large-v3-turbo-20/utterance-windows.jsonl"
+  },
+  "extraction_wall_time_s": 10.919679042184725,
+  "generated_at": "2026-05-08T18:36:28.199475+00:00",
+  "input_files": [
+    ".data/audio/28b11907-34cb-4a7b-a1b9-35e5732ffd1e_first_3600s.wav",
+    ".data/audio/2fab3853-9d9d-4acb-8294-44785f42a2d2_first_3600s.wav",
+    ".data/audio/61f874fe-d881-4223-8446-58db40f7b861_first_3600s.wav",
+    ".data/audio/6e00fa5f-180b-4545-907d-eb6aef73a1c0_first_3600s.wav",
+    ".data/audio/f819e6b7-4a7c-4719-bc3b-0bbc53dd4b69_first_3600s.wav",
+    ".data/audio/test-4046ab07-ac72-457c-bc88-45b276af297b_first_3600s.wav",
+    ".data/audio/test-ac2c7c59-3ccc-4f70-aff3-d0fbace73d81_first_3600s.wav",
+    ".data/audio/test-af873b69-38cc-43dd-aeae-6379f5452b88_first_3600s.wav"
+  ],
+  "machine": {
+    "machine": "arm64",
+    "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "python": "3.13.12"
+  },
+  "model": {
+    "model_id": "mlx-community/whisper-large-v3-turbo",
+    "package": "mlx-whisper",
+    "package_version": "0.4.3",
+    "provider": "mlx_whisper",
+    "quantization": null
+  },
+  "settings": {
+    "chunk_ms": 200,
+    "limit_segments": 20,
+    "max_audio_minutes": null,
+    "post_roll_ms": 250.0,
+    "pre_roll_ms": 150.0
+  },
+  "summary": {
+    "artifact_dir": ".data/stt/silero-mlx-large-v3-turbo-20",
+    "empty_transcript_rate": 0.0,
+    "error_count": 0,
+    "files": 8,
+    "model_id": "mlx-community/whisper-large-v3-turbo",
+    "model_load_time_s": 0.9394554169848561,
+    "real_time_factor": 0.22313784919747606,
+    "source_audio_duration_s": 3879.2,
+    "stt_provider": "mlx_whisper",
+    "stt_wall_time_s": 19.068468041019514,
+    "transcribed_speech_duration_s": 85.456,
+    "utterance_windows": 20,
+    "vad_provider": "silero_onnx",
+    "window_wall_p50_s": 0.7905669580213726,
+    "window_wall_p95_s": 0.9413967919535935
+  }
+}

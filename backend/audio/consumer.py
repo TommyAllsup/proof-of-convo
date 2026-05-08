@@ -14,6 +14,7 @@ from backend.audio.vad import VadFrameStats, VadProvider, create_vad_provider
 logger = logging.getLogger("proof.backend.audio.consumer")
 
 EndpointHandler = Callable[[EndpointEvent], None | Awaitable[None]]
+ChunkHandler = Callable[[AudioChunkEvent], None | Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -40,11 +41,13 @@ class EndpointingConsumer:
         *,
         vad_provider: VadProvider | None = None,
         vad_provider_name: str = "rms",
+        chunk_handler: ChunkHandler | None = None,
         endpoint_handler: EndpointHandler | None = None,
         recent_event_limit: int = 100,
     ) -> None:
         self._queue = queue
         self._vad = vad_provider or create_vad_provider(vad_provider_name)
+        self._chunk_handler = chunk_handler
         self._endpoint_handler = endpoint_handler
         self._recent_events: deque[EndpointEvent] = deque(maxlen=recent_event_limit)
         self._task: asyncio.Task[None] | None = None
@@ -119,6 +122,11 @@ class EndpointingConsumer:
         return self._vad.latest_frame_stats
 
     def _consume(self, event: AudioChunkEvent) -> None:
+        if self._chunk_handler is not None:
+            result = self._chunk_handler(event)
+            if inspect.isawaitable(result):
+                asyncio.ensure_future(result)
+
         try:
             endpoint_events = self._vad.process(event)
         except Exception:

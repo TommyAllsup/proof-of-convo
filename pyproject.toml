@@ -8,6 +8,7 @@ dependencies = [
   "fastapi>=0.115.0",
   "langgraph>=0.2.0",
   "mlx>=0.26.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx-whisper>=0.4.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "numpy>=2.0.0",
   "onnxruntime>=1.20.0",
   "pydantic>=2.8.0",
@@ -33,6 +34,7 @@ analyze-telemetry = "scripts.analyze_telemetry:main"
 send-test-audio = "scripts.send_test_audio:main"
 check-audio-devices = "scripts.check_audio_devices:main"
 benchmark-vad = "scripts.benchmark_vad:main"
+benchmark-stt = "scripts.benchmark_stt:main"
 
 [build-system]
 requires = ["hatchling"]

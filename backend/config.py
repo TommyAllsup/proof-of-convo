@@ -23,6 +23,13 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return float(value)
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str = os.getenv("PROOF_BACKEND_HOST", "127.0.0.1")
@@ -35,6 +42,14 @@ class Settings:
     telemetry_enabled: bool = _env_bool("PROOF_TELEMETRY_ENABLED", True)
     telemetry_dir: Path = Path(os.getenv("PROOF_TELEMETRY_DIR", ".data/telemetry"))
     vad_provider: str = os.getenv("PROOF_VAD_PROVIDER", "rms")
+    stt_enabled: bool = _env_bool("PROOF_STT_ENABLED", False)
+    stt_provider: str = os.getenv("PROOF_STT_PROVIDER", "fake")
+    stt_model: str | None = os.getenv("PROOF_STT_MODEL")
+    stt_language: str | None = os.getenv("PROOF_STT_LANGUAGE")
+    stt_queue_max: int = _env_int("PROOF_STT_QUEUE_MAX", 32)
+    stt_buffer_history_ms: float = _env_float("PROOF_STT_BUFFER_HISTORY_MS", 120_000.0)
+    stt_pre_roll_ms: float = _env_float("PROOF_STT_PRE_ROLL_MS", 150.0)
+    stt_post_roll_ms: float = _env_float("PROOF_STT_POST_ROLL_MS", 250.0)
 
 
 settings = Settings()

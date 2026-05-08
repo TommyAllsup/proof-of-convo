@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from backend.audio.consumer import EndpointingConsumer
 from backend.audio.frames import AudioPacketError, parse_audio_packet
+from backend.audio.live_stt import LiveSttOrchestrator, LiveTranscript
 from backend.audio.manager import AudioStreamManager, now_ms
 from backend.config import settings
 from backend.models.audio import ClientPing, ErrorEvent, SessionAck, SessionStart, SessionStop
@@ -34,18 +35,36 @@ manager = AudioStreamManager(
     telemetry_dir=settings.telemetry_dir,
     telemetry_enabled=settings.telemetry_enabled,
 )
-audio_consumer = EndpointingConsumer(manager.queue, vad_provider_name=settings.vad_provider)
+live_stt = LiveSttOrchestrator(
+    enabled=settings.stt_enabled,
+    provider_name=settings.stt_provider,
+    model_id=settings.stt_model,
+    language=settings.stt_language,
+    vad_provider_name=settings.vad_provider,
+    queue_max=settings.stt_queue_max,
+    buffer_history_ms=settings.stt_buffer_history_ms,
+    pre_roll_ms=settings.stt_pre_roll_ms,
+    post_roll_ms=settings.stt_post_roll_ms,
+)
+audio_consumer = EndpointingConsumer(
+    manager.queue,
+    vad_provider_name=settings.vad_provider,
+    chunk_handler=live_stt.observe_chunk,
+    endpoint_handler=live_stt.handle_endpoint,
+)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
+    live_stt.start()
     audio_consumer.start()
     logger.info("backend_start host=%s port=%s", settings.host, settings.port)
     try:
         yield
     finally:
         await audio_consumer.stop()
+        await live_stt.stop()
         manager.close_all()
         logger.info("backend_stop")
 
@@ -68,6 +87,7 @@ async def health() -> dict[str, Any]:
         "active_sessions": len(manager.list_sessions()),
         "audio_queue_depth": manager.queue.qsize(),
         "audio_consumer": asdict(audio_consumer.stats()),
+        "stt_worker": asdict(live_stt.stats()),
     }
 
 
@@ -90,6 +110,26 @@ async def audio_consumer_status() -> dict[str, Any]:
             }
             for event in audio_consumer.recent_events()
         ],
+    }
+
+
+@app.get("/api/stt")
+async def stt_status() -> dict[str, Any]:
+    return {
+        "stats": asdict(live_stt.stats()),
+        "recent_transcripts": [
+            _live_transcript_payload(item) for item in live_stt.recent_transcripts()
+        ],
+    }
+
+
+def _live_transcript_payload(item: LiveTranscript) -> dict[str, Any]:
+    return {
+        "completed_at_ms": item.completed_at_ms,
+        "window": asdict(item.window),
+        "speaker": asdict(item.speaker),
+        "utterance": item.utterance.model_dump(mode="json"),
+        "transcript": asdict(item.transcript),
     }
 
 
