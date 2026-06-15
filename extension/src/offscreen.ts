@@ -1,4 +1,4 @@
-import { encodeAudioPacket } from "./shared/audioPacket";
+import { type AudioPacketSource, encodeAudioPacket } from "./shared/audioPacket";
 import type {
   RuntimeStatus,
   StartOffscreenCaptureRequest,
@@ -116,13 +116,13 @@ class BackendSocket {
 
 class CaptureController {
   private audioContext?: AudioContext;
-  private mediaStream?: MediaStream;
-  private socket?: BackendSocket;
-  private source?: MediaStreamAudioSourceNode;
-  private worklet?: AudioWorkletNode;
-  private monitorGain?: GainNode;
+  private tabStream?: MediaStream;
+  private tabSocket?: BackendSocket;
+  private tabSource?: MediaStreamAudioSourceNode;
+  private tabWorklet?: AudioWorkletNode;
+  private tabMonitorGain?: GainNode;
   private sessionId?: string;
-  private sequence = 0;
+  private sequences: Record<AudioPacketSource, number> = { tab: 0, mic: 0 };
   private captureStartedAtMs = Date.now();
   private lastStatusAtMs = 0;
 
@@ -130,23 +130,14 @@ class CaptureController {
     await this.stop("restart");
 
     this.captureStartedAtMs = Date.now();
-    this.sequence = 0;
+    this.sequences = { tab: 0, mic: 0 };
     this.sessionId = request.sessionId;
-    this.socket = new BackendSocket(request.backendWsUrl, (status) => this.postStatus(status));
-    this.socket.connect();
-    this.socket.sendJson({
-      type: "session_start",
-      session_id: request.sessionId,
-      tab_id: request.tabId,
-      meeting_url: request.meetingUrl,
-      sample_rate: 16_000,
-      chunk_ms: 200,
-      client_started_at_ms: this.captureStartedAtMs,
-      client_sent_at_ms: Date.now(),
-      telemetry_enabled: request.telemetryEnabled
-    });
+    this.tabSocket = this.createSourceSocket("tab", request);
 
-    const constraints = {
+    this.audioContext = new AudioContext();
+    await this.audioContext.audioWorklet.addModule(chrome.runtime.getURL("assets/pcm-worklet.js"));
+
+    const tabConstraints = {
       audio: {
         mandatory: {
           chromeMediaSource: "tab",
@@ -156,35 +147,25 @@ class CaptureController {
       video: false
     } as MediaStreamConstraints;
 
-    this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-    this.mediaStream.getAudioTracks().forEach((track) => {
-      track.addEventListener("ended", () => {
-        this.postStatus({
-          captureState: "error",
-          backendState: "disconnected",
-          error: "Tab capture track ended."
-        });
-        this.stop("track_ended").catch(() => undefined);
-      });
-    });
+    this.tabStream = await navigator.mediaDevices.getUserMedia(tabConstraints);
 
-    this.audioContext = new AudioContext();
-    await this.audioContext.audioWorklet.addModule(chrome.runtime.getURL("assets/pcm-worklet.js"));
-    this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
+    this.watchTrackEnds(this.tabStream, "Tab capture track ended.");
 
-    const monitor = this.audioContext.createMediaStreamSource(this.mediaStream);
+    this.tabSource = this.audioContext.createMediaStreamSource(this.tabStream);
+
+    const monitor = this.audioContext.createMediaStreamSource(this.tabStream);
     monitor.connect(this.audioContext.destination);
 
-    this.worklet = new AudioWorkletNode(this.audioContext, "pcm-worklet", {
-      processorOptions: { targetSampleRate: 16_000, chunkMs: 200 }
-    });
-    this.monitorGain = this.audioContext.createGain();
-    this.monitorGain.gain.value = 0;
+    this.tabWorklet = this.createWorklet("tab", request);
+    this.tabMonitorGain = this.audioContext.createGain();
+    this.tabMonitorGain.gain.value = 0;
 
-    this.source.connect(this.worklet);
-    this.worklet.connect(this.monitorGain).connect(this.audioContext.destination);
-    this.worklet.port.onmessage = (event: MessageEvent<WorkletPcmMessage>) =>
-      this.handlePcmChunk(event.data, request);
+    this.tabSource.connect(this.tabWorklet);
+    this.tabWorklet.connect(this.tabMonitorGain).connect(this.audioContext.destination);
+
+    if (this.audioContext.state === "suspended") {
+      await this.audioContext.resume();
+    }
 
     this.postStatus({
       captureState: "streaming",
@@ -196,33 +177,82 @@ class CaptureController {
     });
   }
 
+  private createSourceSocket(
+    source: AudioPacketSource,
+    request: StartOffscreenCaptureRequest
+  ): BackendSocket {
+    const socket = new BackendSocket(request.backendWsUrl, (status) => this.postStatus(status));
+    socket.connect();
+    socket.sendJson({
+      type: "session_start",
+      session_id: this.sourceSessionId(request.sessionId, source),
+      tab_id: request.tabId,
+      meeting_url: `${request.meetingUrl}#source=${source}`,
+      sample_rate: 16_000,
+      chunk_ms: 200,
+      client_started_at_ms: this.captureStartedAtMs,
+      client_sent_at_ms: Date.now(),
+      telemetry_enabled: request.telemetryEnabled,
+      audio_source: source
+    });
+    return socket;
+  }
+
+  private watchTrackEnds(stream: MediaStream, error: string): void {
+    stream.getAudioTracks().forEach((track) => {
+      track.addEventListener("ended", () => {
+        this.postStatus({
+          captureState: "error",
+          backendState: "disconnected",
+          error
+        });
+        this.stop("track_ended").catch(() => undefined);
+      });
+    });
+  }
+
+  private createWorklet(
+    source: AudioPacketSource,
+    request: StartOffscreenCaptureRequest
+  ): AudioWorkletNode {
+    if (!this.audioContext) {
+      throw new Error("Audio context is not initialized.");
+    }
+    const worklet = new AudioWorkletNode(this.audioContext, "pcm-worklet", {
+      processorOptions: { targetSampleRate: 16_000, chunkMs: 200 }
+    });
+    worklet.port.onmessage = (event: MessageEvent<WorkletPcmMessage>) =>
+      this.handlePcmChunk(event.data, request, source);
+    return worklet;
+  }
+
   async stop(reason: string): Promise<void> {
     if (this.sessionId) {
-      this.socket?.sendJson({
+      this.tabSocket?.sendJson({
         type: "session_stop",
-        session_id: this.sessionId,
+        session_id: this.sourceSessionId(this.sessionId, "tab"),
         reason,
         client_sent_at_ms: Date.now()
       });
     }
-    this.socket?.close();
-    this.socket = undefined;
+    this.tabSocket?.close();
+    this.tabSocket = undefined;
     this.sessionId = undefined;
 
-    this.worklet?.disconnect();
-    this.monitorGain?.disconnect();
-    this.source?.disconnect();
-    this.mediaStream?.getTracks().forEach((track) => track.stop());
+    this.tabWorklet?.disconnect();
+    this.tabMonitorGain?.disconnect();
+    this.tabSource?.disconnect();
+    this.tabStream?.getTracks().forEach((track) => track.stop());
 
     if (this.audioContext && this.audioContext.state !== "closed") {
       await this.audioContext.close();
     }
 
     this.audioContext = undefined;
-    this.mediaStream = undefined;
-    this.source = undefined;
-    this.worklet = undefined;
-    this.monitorGain = undefined;
+    this.tabStream = undefined;
+    this.tabSource = undefined;
+    this.tabWorklet = undefined;
+    this.tabMonitorGain = undefined;
 
     this.postStatus({
       captureState: "idle",
@@ -233,34 +263,44 @@ class CaptureController {
     });
   }
 
-  private handlePcmChunk(message: WorkletPcmMessage, request: StartOffscreenCaptureRequest): void {
-    if (message.type !== "pcm" || !this.socket) {
+  private handlePcmChunk(
+    message: WorkletPcmMessage,
+    request: StartOffscreenCaptureRequest,
+    source: AudioPacketSource
+  ): void {
+    const socket = source === "tab" ? this.tabSocket : undefined;
+    if (message.type !== "pcm" || !socket) {
       return;
     }
 
     const clientSentAtMs = Date.now();
     const chunkDurationMs = (message.frameCount / message.sampleRate) * 1000.0;
     const packet = encodeAudioPacket({
-      sequence: this.sequence,
+      sequence: this.sequences[source],
       tabId: request.tabId,
       captureStartedAtMs: this.captureStartedAtMs,
       chunkStartedAtMs: clientSentAtMs - chunkDurationMs,
       clientSentAtMs,
       sampleRate: message.sampleRate,
+      source,
       pcm16: message.pcm16
     });
-    this.socket.sendBinary(packet);
-    this.sequence += 1;
+    socket.sendBinary(packet);
+    this.sequences[source] += 1;
 
     if (clientSentAtMs - this.lastStatusAtMs >= 250) {
       this.postStatus({
         captureState: "streaming",
         clientRms: message.rms,
         peak: message.peak,
-        sequence: this.sequence
+        sequence: this.sequences[source]
       });
       this.lastStatusAtMs = clientSentAtMs;
     }
+  }
+
+  private sourceSessionId(sessionId: string, source: AudioPacketSource): string {
+    return `${sessionId}:${source}`;
   }
 
   private postStatus(status: Partial<RuntimeStatus>): void {

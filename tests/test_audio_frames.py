@@ -31,6 +31,29 @@ def test_audio_packet_round_trip() -> None:
     assert parsed.sample_rate == 16_000
     assert parsed.sample_count == 5
     assert parsed.pcm16 == pcm16
+    assert parsed.source == "unknown"
+
+
+def test_audio_packet_round_trip_with_source() -> None:
+    pcm16 = np.array([0, 1000, -1000], dtype="<i2").tobytes()
+    packet = build_audio_packet(
+        sequence=7,
+        tab_id=321,
+        capture_started_at_ms=10.0,
+        chunk_started_at_ms=20.0,
+        client_sent_at_ms=30.0,
+        sample_rate=16_000,
+        pcm16=pcm16,
+        source="mic",
+    )
+
+    parsed = parse_audio_packet(packet)
+
+    assert parsed.sequence == 7
+    assert parsed.tab_id == 321
+    assert parsed.sample_count == 3
+    assert parsed.source == "mic"
+    assert parsed.pcm16 == pcm16
 
 
 def test_audio_packet_rejects_bad_payload_size() -> None:

@@ -50,6 +50,27 @@ class Settings:
     stt_buffer_history_ms: float = _env_float("PROOF_STT_BUFFER_HISTORY_MS", 120_000.0)
     stt_pre_roll_ms: float = _env_float("PROOF_STT_PRE_ROLL_MS", 150.0)
     stt_post_roll_ms: float = _env_float("PROOF_STT_POST_ROLL_MS", 250.0)
+    tts_enabled: bool = _env_bool("PROOF_TTS_ENABLED", False)
+    tts_provider: str = os.getenv("PROOF_TTS_PROVIDER", "fake")
+    tts_model: str | None = os.getenv("PROOF_TTS_MODEL")
+    tts_voice_id: str | None = os.getenv("PROOF_TTS_VOICE_ID")
+    tts_voice_name: str = os.getenv("PROOF_TTS_VOICE_NAME", "meeting-agent")
+    tts_output_format: str = os.getenv("PROOF_TTS_OUTPUT_FORMAT", "pcm_24000")
+    tts_sample_rate: int = _env_int("PROOF_TTS_SAMPLE_RATE", 24_000)
+    tts_queue_max: int = _env_int("PROOF_TTS_QUEUE_MAX", 4)
+    tts_output_device: str | None = os.getenv("PROOF_TTS_OUTPUT_DEVICE", "BlackHole")
+    tts_playback_enabled: bool = _env_bool("PROOF_TTS_PLAYBACK_ENABLED", False)
+    tts_chunk_size_bytes: int = _env_int("PROOF_TTS_CHUNK_SIZE_BYTES", 4096)
+    tts_dump_dir: Path = Path(os.getenv("PROOF_TTS_DUMP_DIR", ".data/tts"))
+    tts_dump_enabled: bool = _env_bool("PROOF_TTS_DUMP_ENABLED", False)
+    elevenlabs_api_key: str | None = os.getenv("ELEVENLABS_API_KEY") or None
+    elevenlabs_base_url: str = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io")
+    cartesia_api_key: str | None = os.getenv("CARTESIA_API_KEY") or None
+    cartesia_base_url: str = os.getenv(
+        "CARTESIA_WS_URL",
+        "wss://api.cartesia.ai/tts/websocket",
+    )
+    cartesia_version: str = os.getenv("CARTESIA_VERSION", "2025-04-16")
 
 
 settings = Settings()

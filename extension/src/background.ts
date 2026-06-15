@@ -122,6 +122,11 @@ async function stopCapture(reason = "user_stop"): Promise<RuntimeStatus> {
   chrome.runtime
     .sendMessage({ target: "offscreen", type: "STOP_OFFSCREEN_CAPTURE", reason })
     .catch(() => undefined);
+  if (status.activeTabId !== undefined) {
+    chrome.tabs
+      .sendMessage(status.activeTabId, { target: "content", type: "STOP_CONTENT_MIC_CAPTURE", reason })
+      .catch(() => undefined);
+  }
   await broadcastStatus({
     captureState: "idle",
     backendState: "disconnected",

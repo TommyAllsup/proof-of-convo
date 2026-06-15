@@ -129,6 +129,64 @@ empty transcripts. See `docs/benchmarks/phase-2b-stt-silero-mlx-large-v3-turbo-2
 The extension popup and sidebar poll `/api/stt` and show the recent speaker-attributed transcript
 feed when STT is enabled.
 
+Phase 3 manual TTS and virtual mic playback:
+
+```bash
+PROOF_TTS_ENABLED=true \
+PROOF_TTS_PROVIDER=fake \
+PROOF_TTS_PLAYBACK_ENABLED=false \
+uv run backend
+```
+
+The fake provider verifies the queue, streaming, and stats path without cloud credentials or an audio
+device. Set `PROOF_TTS_DUMP_ENABLED=true` to write synthesized PCM to inspectable WAV files under
+`.data/tts/`. Status and manual speech APIs:
+
+```bash
+curl http://127.0.0.1:8000/api/tts
+curl -X POST http://127.0.0.1:8000/api/tts/speak \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Thanks. I have one clarifying question: what decision do we need before the next step?","interrupt":true}'
+curl -X POST http://127.0.0.1:8000/api/tts/interrupt
+```
+
+For audible Google Meet injection, install/configure BlackHole, set Google Meet's microphone to the
+BlackHole device, then enable playback and a real provider:
+
+```bash
+PROOF_TTS_ENABLED=true \
+PROOF_TTS_PROVIDER=elevenlabs \
+PROOF_TTS_MODEL=eleven_flash_v2_5 \
+PROOF_TTS_VOICE_ID=your_voice_id \
+ELEVENLABS_API_KEY=your_key \
+PROOF_TTS_PLAYBACK_ENABLED=true \
+PROOF_TTS_OUTPUT_DEVICE=BlackHole \
+uv run backend
+```
+
+Cartesia can be tested with `PROOF_TTS_PROVIDER=cartesia`, `PROOF_TTS_MODEL=sonic-3`, a Cartesia
+voice ID, and `CARTESIA_API_KEY`. `/api/audio/devices` lists output devices visible to PortAudio.
+The extension popup and sidebar include a **Voice** card with TTS health and a manual **Speak**
+button plus **Stop** control for end-to-end voice-routing tests.
+
+Local playback smoke:
+
+```bash
+uv run verify-phase3
+uv run test-tts-playback --provider fake --null
+uv run test-tts-playback --provider fake --device BlackHole
+```
+
+The verifier reports whether BlackHole is visible to PortAudio and whether provider credentials are
+present. The first playback command verifies provider streaming without opening an audio device. The
+second playback command should be used after BlackHole is installed and visible in
+`uv run check-audio-devices`.
+
+Full Google Meet voice-injection verification is documented in
+[docs/phase-3-testing.md](docs/phase-3-testing.md).
+Current completion evidence and remaining environment blocker are tracked in
+[docs/phase-3-completion-audit-2026-05-08.md](docs/phase-3-completion-audit-2026-05-08.md).
+
 ## Extension Quickstart
 
 ```bash

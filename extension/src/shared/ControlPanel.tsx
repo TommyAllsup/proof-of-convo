@@ -9,6 +9,8 @@ import {
   Play,
   Settings2,
   SlidersHorizontal,
+  Volume2,
+  VolumeX,
   Waves
 } from "lucide-react";
 import * as React from "react";
@@ -20,9 +22,11 @@ import { sendRuntimeMessage } from "./chrome";
 import { startCaptureFromCurrentTab, stopCapture } from "./capture";
 import type { ParticipationMode } from "./messages";
 import { useAudioConsumerStatus } from "./useAudioConsumerStatus";
+import { useAudioDevices } from "./useAudioDevices";
 import { useRuntimeStatus } from "./useRuntimeStatus";
 import { useSettings } from "./useSettings";
 import { useSttStatus } from "./useSttStatus";
+import { useTtsStatus } from "./useTtsStatus";
 
 interface ControlPanelProps {
   surface: "popup" | "sidepanel";
@@ -38,13 +42,18 @@ export function ControlPanel({ surface }: ControlPanelProps) {
   const status = useRuntimeStatus();
   const { settings, updateSettings } = useSettings();
   const consumer = useAudioConsumerStatus(settings.backendWsUrl);
+  const devices = useAudioDevices(settings.backendWsUrl);
   const stt = useSttStatus(settings.backendWsUrl);
+  const tts = useTtsStatus(settings.backendWsUrl);
   const [busy, setBusy] = React.useState(false);
   const [localError, setLocalError] = React.useState<string | undefined>();
+  const [speakText, setSpeakText] = React.useState("Thanks. I have one clarifying question: what decision do we need before the next step?");
 
   const isStreaming = status.captureState === "streaming";
   const isBusy = busy || status.captureState === "starting" || status.captureState === "stopping";
   const level = Math.min(100, Math.round((status.clientRms ?? status.rms ?? 0) * 420));
+  const outputDevice = tts.status?.stats.output_device;
+  const outputVisible = isOutputDeviceVisible(devices.status, outputDevice);
 
   async function runAction(action: () => Promise<unknown>): Promise<void> {
     setBusy(true);
@@ -183,6 +192,71 @@ export function ControlPanel({ surface }: ControlPanelProps) {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-medium">
+              <Volume2 className="h-4 w-4 text-primary" />
+              Voice
+            </div>
+            <div className={tts.status?.stats.running ? "text-xs text-primary" : "text-xs text-muted-foreground"}>
+              {tts.status?.stats.running ? "running" : tts.status?.stats.enabled ? "enabled" : "disabled"}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Metric label="Spoken" value={formatCount(tts.status?.stats.completed_speeches)} />
+              <Metric label="Queue" value={formatCount(tts.status?.stats.queued_jobs)} />
+              <Metric label="TTFA" value={formatLatency(tts.status?.stats.last_ttfa_ms ?? undefined)} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <Metric label="TTS" value={tts.status?.stats.provider ?? "--"} />
+              <Metric label="Output" value={tts.status?.stats.output_device ?? tts.status?.stats.player ?? "--"} />
+            </div>
+
+            {tts.status?.stats.playback_enabled ? (
+              <StatusLine
+                text={
+                  outputVisible
+                    ? `Output device visible: ${outputDevice}`
+                    : `Output device not visible: ${outputDevice ?? "default"}`
+                }
+                danger={!outputVisible}
+              />
+            ) : null}
+
+            <label className="block space-y-2">
+              <span className="text-xs text-muted-foreground">Manual speak</span>
+              <textarea
+                className="min-h-20 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-xs leading-5 outline-none focus:border-primary"
+                value={speakText}
+                onChange={(event) => setSpeakText(event.currentTarget.value)}
+              />
+            </label>
+
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                disabled={isBusy || !speakText.trim() || !tts.status?.stats.running}
+                onClick={() => runAction(() => tts.speak(speakText.trim(), true))}
+              >
+                <Volume2 className="h-4 w-4" />
+                Speak
+              </Button>
+              <Button
+                variant="danger"
+                disabled={isBusy || !tts.status?.stats.running}
+                onClick={() => runAction(tts.interrupt)}
+              >
+                <VolumeX className="h-4 w-4" />
+                Stop
+              </Button>
+            </div>
+
+            <StatusLine text={devices.error} danger />
+            <StatusLine text={tts.error ?? tts.status?.stats.last_error ?? tts.endpointUrl} danger={Boolean(tts.error || tts.status?.stats.last_error)} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-medium">
               <Radio className="h-4 w-4 text-primary" />
               Consumer
             </div>
@@ -315,6 +389,24 @@ function StatusLine({ text, danger = false }: { text: string | undefined; danger
       {text}
     </p>
   );
+}
+
+function isOutputDeviceVisible(
+  status: import("./messages").AudioDevicesStatus | undefined,
+  expected: string | null | undefined
+): boolean {
+  if (!status?.ok || !expected) {
+    return false;
+  }
+  const value = expected.trim().toLowerCase();
+  if (!value) {
+    return false;
+  }
+  if (/^\d+$/.test(value)) {
+    const index = Number(value);
+    return status.output_devices.some((device) => device.index === index);
+  }
+  return status.output_devices.some((device) => device.name.toLowerCase().includes(value));
 }
 
 function formatLatency(value: number | undefined): string {

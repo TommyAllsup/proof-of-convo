@@ -7,9 +7,19 @@ import numpy as np
 from numpy.typing import NDArray
 
 MAGIC = 0x504F4331  # "POC1"
-VERSION = 1
-HEADER_BYTES = 48
-HEADER_STRUCT = struct.Struct(">IHHIIdddII")
+VERSION = 2
+HEADER_BYTES_V1 = 48
+HEADER_BYTES_V2 = 52
+HEADER_BYTES = HEADER_BYTES_V2
+HEADER_STRUCT_V1 = struct.Struct(">IHHIIdddII")
+HEADER_STRUCT_V2 = struct.Struct(">IHHIIdddIIBxxx")
+
+SOURCE_IDS = {
+    0: "unknown",
+    1: "tab",
+    2: "mic",
+}
+SOURCE_NAMES = {value: key for key, value in SOURCE_IDS.items()}
 
 
 class AudioPacketError(ValueError):
@@ -26,6 +36,7 @@ class AudioPacket:
     sample_rate: int
     sample_count: int
     pcm16: bytes
+    source: str = "unknown"
 
     @property
     def duration_ms(self) -> float:
@@ -33,10 +44,61 @@ class AudioPacket:
 
 
 def parse_audio_packet(message: bytes) -> AudioPacket:
-    if len(message) < HEADER_BYTES:
+    if len(message) < HEADER_BYTES_V1:
         raise AudioPacketError(f"audio packet too short: {len(message)} bytes")
 
     (
+        magic,
+        version,
+        header_bytes,
+    ) = struct.Struct(">IHH").unpack_from(message, 0)
+
+    if version == 1:
+        (
+            magic,
+            version,
+            header_bytes,
+            sequence,
+            tab_id,
+            capture_started_at_ms,
+            chunk_started_at_ms,
+            client_sent_at_ms,
+            sample_rate,
+            sample_count,
+        ) = HEADER_STRUCT_V1.unpack_from(message, 0)
+        source = "unknown"
+    elif version == VERSION:
+        (
+            magic,
+            version,
+            header_bytes,
+            sequence,
+            tab_id,
+            capture_started_at_ms,
+            chunk_started_at_ms,
+            client_sent_at_ms,
+            sample_rate,
+            sample_count,
+            source_id,
+        ) = HEADER_STRUCT_V2.unpack_from(message, 0)
+        source = SOURCE_IDS.get(source_id)
+        if source is None:
+            raise AudioPacketError(f"unknown audio source id: {source_id}")
+    else:
+        raise AudioPacketError(f"unsupported audio packet version: {version}")
+
+    (
+        _magic,
+        _version,
+        _header_bytes,
+        sequence,
+        tab_id,
+        capture_started_at_ms,
+        chunk_started_at_ms,
+        client_sent_at_ms,
+        sample_rate,
+        sample_count,
+    ) = (
         magic,
         version,
         header_bytes,
@@ -47,14 +109,16 @@ def parse_audio_packet(message: bytes) -> AudioPacket:
         client_sent_at_ms,
         sample_rate,
         sample_count,
-    ) = HEADER_STRUCT.unpack_from(message, 0)
+    )
 
     if magic != MAGIC:
         raise AudioPacketError(f"bad audio packet magic: 0x{magic:x}")
-    if version != VERSION:
-        raise AudioPacketError(f"unsupported audio packet version: {version}")
-    if header_bytes != HEADER_BYTES:
+    if header_bytes not in {HEADER_BYTES_V1, HEADER_BYTES_V2}:
         raise AudioPacketError(f"unexpected header size: {header_bytes}")
+    if version == 1 and header_bytes != HEADER_BYTES_V1:
+        raise AudioPacketError(f"unexpected v1 header size: {header_bytes}")
+    if version == VERSION and header_bytes != HEADER_BYTES_V2:
+        raise AudioPacketError(f"unexpected v2 header size: {header_bytes}")
     if sample_rate <= 0:
         raise AudioPacketError(f"invalid sample rate: {sample_rate}")
     if sample_count <= 0:
@@ -76,6 +140,7 @@ def parse_audio_packet(message: bytes) -> AudioPacket:
         sample_rate=sample_rate,
         sample_count=sample_count,
         pcm16=pcm16,
+        source=source,
     )
 
 
@@ -88,11 +153,15 @@ def build_audio_packet(
     client_sent_at_ms: float,
     sample_rate: int,
     pcm16: bytes,
+    source: str = "unknown",
 ) -> bytes:
     if len(pcm16) % 2 != 0:
         raise AudioPacketError("pcm16 payload must contain complete 16-bit samples")
     sample_count = len(pcm16) // 2
-    header = HEADER_STRUCT.pack(
+    source_id = SOURCE_NAMES.get(source)
+    if source_id is None:
+        raise AudioPacketError(f"unknown audio source: {source}")
+    header = HEADER_STRUCT_V2.pack(
         MAGIC,
         VERSION,
         HEADER_BYTES,
@@ -103,6 +172,7 @@ def build_audio_packet(
         client_sent_at_ms,
         sample_rate,
         sample_count,
+        source_id,
     )
     return header + pcm16
 

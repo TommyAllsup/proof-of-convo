@@ -35,6 +35,8 @@ send-test-audio = "scripts.send_test_audio:main"
 check-audio-devices = "scripts.check_audio_devices:main"
 benchmark-vad = "scripts.benchmark_vad:main"
 benchmark-stt = "scripts.benchmark_stt:main"
+test-tts-playback = "scripts.test_tts_playback:main"
+verify-phase3 = "scripts.verify_phase3:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -115,6 +115,70 @@ export interface SttStatus {
   recent_transcripts: SttTranscriptItem[];
 }
 
+export interface TtsWorkerStats {
+  enabled: boolean;
+  running: boolean;
+  provider: string;
+  model_id: string;
+  voice_id: string;
+  voice_name: string;
+  sample_rate: number;
+  player: string;
+  output_device: string | null;
+  playback_enabled: boolean;
+  queued_jobs: number;
+  enqueued_jobs: number;
+  dropped_jobs: number;
+  completed_speeches: number;
+  processing_errors: number;
+  total_audio_bytes: number;
+  interrupted_speeches: number;
+  active_job_id: string | null;
+  last_started_at_ms: number | null;
+  last_completed_at_ms: number | null;
+  last_ttfa_ms: number | null;
+  last_error: string | null;
+  recent_speeches: number;
+}
+
+export interface TtsSpeechItem {
+  job_id: string;
+  text: string;
+  provider: string;
+  model_id: string;
+  voice_id: string;
+  voice_name: string;
+  queued_at_ms: number;
+  started_at_ms: number;
+  completed_at_ms: number;
+  ttfa_ms: number | null;
+  wall_time_s: number;
+  audio_bytes: number;
+  sample_rate: number;
+  dump_path: string | null;
+  error: string | null;
+  interrupted: boolean;
+  interrupt_reason: string | null;
+}
+
+export interface TtsStatus {
+  stats: TtsWorkerStats;
+  recent_speeches: TtsSpeechItem[];
+}
+
+export interface AudioOutputDevice {
+  index: number;
+  name: string;
+  max_output_channels: number;
+  default_samplerate: number;
+}
+
+export interface AudioDevicesStatus {
+  ok: boolean;
+  error?: string;
+  output_devices: AudioOutputDevice[];
+}
+
 export interface UiSettings {
   backendWsUrl: string;
   participationMode: ParticipationMode;
@@ -172,6 +236,22 @@ export interface StopOffscreenCaptureRequest {
   reason?: string;
 }
 
+export interface StartContentMicCaptureRequest {
+  target: "content";
+  type: "START_CONTENT_MIC_CAPTURE";
+  sessionId: string;
+  tabId: number;
+  meetingUrl: string;
+  backendWsUrl: string;
+  telemetryEnabled: boolean;
+}
+
+export interface StopContentMicCaptureRequest {
+  target: "content";
+  type: "STOP_CONTENT_MIC_CAPTURE";
+  reason?: string;
+}
+
 export interface OffscreenStatusMessage {
   type: "OFFSCREEN_STATUS";
   status: Partial<RuntimeStatus>;
@@ -191,6 +271,8 @@ export type RuntimeRequest =
   | OpenSidePanelRequest
   | PrepareOffscreenRequest
   | OffscreenStatusMessage;
+
+export type ContentCaptureRequest = StartContentMicCaptureRequest | StopContentMicCaptureRequest;
 
 export const DEFAULT_SETTINGS: UiSettings = {
   backendWsUrl: "ws://127.0.0.1:8000/ws/audio",

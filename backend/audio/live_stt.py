@@ -245,7 +245,7 @@ class LiveSttOrchestrator:
             job = await self._queue.get()
             try:
                 transcript, audio = await asyncio.to_thread(self._transcribe_job_sync, job)
-                speaker = self._diarizer.assign(window=job.window, audio=audio)
+                speaker = self._speaker_for_window(job.window, audio)
                 utterance = _utterance_from_transcript(job.window, transcript, speaker)
                 if transcript.error is not None:
                     self._processing_errors += 1
@@ -320,6 +320,11 @@ class LiveSttOrchestrator:
             self._worker_thread_prepared = True
         audio = pcm16_to_float32(job.pcm16)
         return self._provider.transcribe_audio(job.window, audio), audio
+
+    def _speaker_for_window(self, window: UtteranceWindow, audio: Any) -> SpeakerAttribution:
+        if window.session_id.endswith(":mic"):
+            return SpeakerAttribution(speaker="You", confidence=1.0, method="source_local_mic")
+        return self._diarizer.assign(window=window, audio=audio)
 
 
 def _ms_offset_to_sample(offset_ms: float, sample_rate: int, *, floor: bool) -> int:

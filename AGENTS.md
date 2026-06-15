@@ -709,3 +709,54 @@ Success criteria:
   0 processing errors.
 - Phase 2 is now complete for the POC plumbing. Remaining improvement is model-quality refinement:
   replace heuristic speaker attribution with Sortformer or speaker-embedding diarization.
+
+### 2026-05-08: Phase 3 TTS and Manual Voice Injection
+
+- Added `backend/tts/providers.py` with a provider-neutral TTS interface, deterministic fake provider,
+  ElevenLabs HTTP streaming adapter, and Cartesia WebSocket adapter. Real providers are configured
+  with `PROOF_TTS_PROVIDER`, `PROOF_TTS_MODEL`, `PROOF_TTS_VOICE_ID`, and the provider API key.
+- Added `backend/tts/playback.py` with `NullAudioPlayer` for tests/smoke checks and
+  `SoundDeviceAudioPlayer` for writing PCM16 chunks to a PortAudio output device such as BlackHole.
+- Added `backend/tts/orchestrator.py` with a separate async TTS worker. It streams provider chunks
+  to playback without blocking audio ingestion/STT, records TTFA/audio-byte/error stats, and keeps
+  recent speech results. It also supports mid-stream interruption at provider chunk boundaries.
+- Wired TTS into `backend.main` lifespan. `/health` now includes `tts_worker`, `/api/tts` exposes
+  worker status and recent speech results, `/api/tts/speak` queues manual speech,
+  `/api/tts/interrupt` stops queued/current speech, and `/api/audio/devices` lists PortAudio output
+  devices. Live `speech_start` endpoint events trigger TTS barge-in interruption.
+- Added optional TTS WAV dumps with `PROOF_TTS_DUMP_ENABLED=true` and `PROOF_TTS_DUMP_DIR=.data/tts`
+  so synthesized audio can be inspected before it is routed into a virtual mic.
+- TTS remains disabled by default with `PROOF_TTS_ENABLED=false`, and real audio device playback is
+  separately gated by `PROOF_TTS_PLAYBACK_ENABLED=false` so backend startup does not call cloud APIs
+  or open BlackHole unexpectedly.
+- Extended `.env.example` and `README.md` with fake smoke, ElevenLabs, Cartesia, and BlackHole setup
+  commands.
+- Added `docs/adr-007-phase-3-tts-voice-injection.md` with the provider/playback decision, local
+  test protocol, known limitation, and follow-ups.
+- Added `docs/phase-3-testing.md` with the operator protocol for BlackHole installation, provider
+  smoke tests, backend voice APIs, Meet mic selection, audible second-participant verification, and
+  troubleshooting.
+- Added `docs/phase-3-completion-audit-2026-05-08.md` mapping each Phase 3 requirement to concrete
+  artifacts, verification output, and the remaining BlackHole/provider environment blocker.
+- Added extension TTS polling (`useTtsStatus`), TypeScript TTS types, and a Voice card with health
+  metrics plus manual Speak and Stop buttons for end-to-end routing tests.
+- Added extension audio-device polling (`useAudioDevices`) so the Voice card warns when playback is
+  enabled but the configured output device is not visible to PortAudio.
+- Added `uv run test-tts-playback` for local provider/playback smoke checks against null output or a
+  named device such as BlackHole.
+- Added `uv run verify-phase3` for repeatable preflight checks of macOS, PortAudio output devices,
+  BlackHole/Homebrew state, dump directory writability, and provider credentials.
+- Added tests for disabled API behavior, fake-provider streaming through the TTS worker,
+  active-stream interruption, endpoint-driven barge-in wiring, WAV dumps, and Phase 3 verifier
+  device matching.
+- Verification passed: `uv run ruff check .`, `uv run mypy .`, `uv run pytest` with 33 tests,
+  extension `npm run lint`, `npm run typecheck`, and `npm run build`.
+- Runtime fake-TTS smoke passed on port 8030 with `PROOF_TTS_ENABLED=true`, `PROOF_TTS_PROVIDER=fake`,
+  and null playback: `/api/tts/speak` queued one utterance, `/api/tts` reported 1 completed speech,
+  51,600 PCM bytes, 0 processing errors, and sub-millisecond fake-provider TTFA.
+- Local device discovery showed no BlackHole output device currently installed/visible; real Google
+  Meet audio injection still requires installing/configuring BlackHole plus provider credentials.
+- `uv run verify-phase3` reports the same machine-readable blocker: BlackHole is not visible to
+  PortAudio and the Homebrew cask is not installed.
+- Remaining Phase 3 improvement: smooth fade-out and provider-specific cancellation messages for
+  interrupted streams.

@@ -1,6 +1,13 @@
 export const AUDIO_PACKET_MAGIC = 0x504f4331;
-export const AUDIO_PACKET_VERSION = 1;
-export const AUDIO_PACKET_HEADER_BYTES = 48;
+export const AUDIO_PACKET_VERSION = 2;
+export const AUDIO_PACKET_HEADER_BYTES = 52;
+
+export type AudioPacketSource = "tab" | "mic";
+
+const AUDIO_SOURCE_IDS: Record<AudioPacketSource, number> = {
+  tab: 1,
+  mic: 2
+};
 
 export interface EncodeAudioPacketInput {
   sequence: number;
@@ -9,6 +16,7 @@ export interface EncodeAudioPacketInput {
   chunkStartedAtMs: number;
   clientSentAtMs: number;
   sampleRate: number;
+  source: AudioPacketSource;
   pcm16: ArrayBuffer;
 }
 
@@ -30,7 +38,7 @@ export function encodeAudioPacket(input: EncodeAudioPacketInput): ArrayBuffer {
   view.setFloat64(32, input.clientSentAtMs, false);
   view.setUint32(40, input.sampleRate, false);
   view.setUint32(44, sampleCount, false);
+  view.setUint8(48, AUDIO_SOURCE_IDS[input.source]);
   new Uint8Array(packet, AUDIO_PACKET_HEADER_BYTES).set(new Uint8Array(input.pcm16));
   return packet;
 }
-

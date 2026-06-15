@@ -7,16 +7,21 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
 from backend.audio.consumer import EndpointingConsumer
+from backend.audio.endpointing import EndpointEvent
 from backend.audio.frames import AudioPacketError, parse_audio_packet
 from backend.audio.live_stt import LiveSttOrchestrator, LiveTranscript
 from backend.audio.manager import AudioStreamManager, now_ms
 from backend.config import settings
 from backend.models.audio import ClientPing, ErrorEvent, SessionAck, SessionStart, SessionStop
+from backend.models.tts import TtsInterruptResponse, TtsSpeakRequest, TtsSpeakResponse
+from backend.tts import TtsOrchestrator, create_audio_player, create_tts_provider
+from backend.tts.orchestrator import TtsSpeechResult
+from backend.tts.playback import list_output_devices
 
 logger = logging.getLogger("proof.backend")
 
@@ -26,6 +31,24 @@ def configure_logging() -> None:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+
+def _tts_api_key(provider_name: str) -> str | None:
+    normalized = provider_name.strip().lower()
+    if normalized == "elevenlabs":
+        return settings.elevenlabs_api_key
+    if normalized == "cartesia":
+        return settings.cartesia_api_key
+    return None
+
+
+def _tts_base_url(provider_name: str) -> str | None:
+    normalized = provider_name.strip().lower()
+    if normalized == "elevenlabs":
+        return settings.elevenlabs_base_url
+    if normalized == "cartesia":
+        return settings.cartesia_base_url
+    return None
 
 
 manager = AudioStreamManager(
@@ -46,11 +69,43 @@ live_stt = LiveSttOrchestrator(
     pre_roll_ms=settings.stt_pre_roll_ms,
     post_roll_ms=settings.stt_post_roll_ms,
 )
+tts_provider = create_tts_provider(
+    settings.tts_provider,
+    api_key=_tts_api_key(settings.tts_provider),
+    voice_id=settings.tts_voice_id,
+    voice_name=settings.tts_voice_name,
+    model_id=settings.tts_model,
+    base_url=_tts_base_url(settings.tts_provider),
+    output_format=settings.tts_output_format,
+    sample_rate=settings.tts_sample_rate,
+    chunk_size_bytes=settings.tts_chunk_size_bytes,
+    cartesia_version=settings.cartesia_version,
+)
+tts = TtsOrchestrator(
+    enabled=settings.tts_enabled,
+    playback_enabled=settings.tts_playback_enabled,
+    provider=tts_provider,
+    player=create_audio_player(
+        playback_enabled=settings.tts_playback_enabled,
+        output_device=settings.tts_output_device,
+    ),
+    queue_max=settings.tts_queue_max,
+    dump_dir=settings.tts_dump_dir,
+    dump_enabled=settings.tts_dump_enabled,
+)
+
+
+def _handle_endpoint_event(event: EndpointEvent) -> None:
+    live_stt.handle_endpoint(event)
+    if event.type == "speech_start":
+        tts.interrupt_current(reason="human_speech")
+
+
 audio_consumer = EndpointingConsumer(
     manager.queue,
     vad_provider_name=settings.vad_provider,
     chunk_handler=live_stt.observe_chunk,
-    endpoint_handler=live_stt.handle_endpoint,
+    endpoint_handler=_handle_endpoint_event,
 )
 
 
@@ -59,10 +114,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     live_stt.start()
     audio_consumer.start()
+    tts.start()
     logger.info("backend_start host=%s port=%s", settings.host, settings.port)
     try:
         yield
     finally:
+        await tts.stop()
         await audio_consumer.stop()
         await live_stt.stop()
         manager.close_all()
@@ -88,6 +145,7 @@ async def health() -> dict[str, Any]:
         "audio_queue_depth": manager.queue.qsize(),
         "audio_consumer": asdict(audio_consumer.stats()),
         "stt_worker": asdict(live_stt.stats()),
+        "tts_worker": asdict(tts.stats()),
     }
 
 
@@ -131,6 +189,46 @@ def _live_transcript_payload(item: LiveTranscript) -> dict[str, Any]:
         "utterance": item.utterance.model_dump(mode="json"),
         "transcript": asdict(item.transcript),
     }
+
+
+@app.get("/api/tts")
+async def tts_status() -> dict[str, Any]:
+    return {
+        "stats": asdict(tts.stats()),
+        "recent_speeches": [_tts_speech_payload(item) for item in tts.recent_speeches()],
+    }
+
+
+@app.post("/api/tts/speak")
+async def speak(request: TtsSpeakRequest) -> TtsSpeakResponse:
+    try:
+        job = tts.enqueue(request.text, interrupt=request.interrupt)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return TtsSpeakResponse(job_id=job.job_id, queued_at_ms=job.queued_at_ms, text=job.text)
+
+
+@app.post("/api/tts/interrupt")
+async def interrupt_tts() -> TtsInterruptResponse:
+    interrupted = tts.interrupt_current(reason="manual_stop")
+    return TtsInterruptResponse(
+        interrupted=interrupted,
+        reason="manual_stop",
+        received_at_ms=now_ms(),
+    )
+
+
+@app.get("/api/audio/devices")
+async def audio_devices() -> dict[str, Any]:
+    try:
+        devices = list_output_devices()
+    except Exception as exc:  # noqa: BLE001 - depends on local PortAudio host state.
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "output_devices": []}
+    return {"ok": True, "output_devices": [asdict(device) for device in devices]}
+
+
+def _tts_speech_payload(item: TtsSpeechResult) -> dict[str, Any]:
+    return asdict(item)
 
 
 async def _send_error(websocket: WebSocket, message: str) -> None:
