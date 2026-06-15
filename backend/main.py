@@ -78,6 +78,7 @@ tts_provider = create_tts_provider(
     base_url=_tts_base_url(settings.tts_provider),
     output_format=settings.tts_output_format,
     sample_rate=settings.tts_sample_rate,
+    speaking_rate=settings.tts_speaking_rate,
     chunk_size_bytes=settings.tts_chunk_size_bytes,
     cartesia_version=settings.cartesia_version,
 )

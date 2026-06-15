@@ -3,12 +3,16 @@ from __future__ import annotations
 import base64
 import json
 import math
+import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 import uuid
+import wave
 from array import array
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -66,6 +70,78 @@ class FakeTtsProvider:
                 samples.append(value)
             yield samples.tobytes()
             produced += sample_count
+
+
+class MacOsSayTtsProvider:
+    def __init__(
+        self,
+        *,
+        voice_id: str | None,
+        voice_name: str,
+        model_id: str | None,
+        sample_rate: int,
+        speaking_rate: int,
+        chunk_size_bytes: int,
+    ) -> None:
+        resolved_voice = voice_id or "Samantha"
+        self._speaking_rate = speaking_rate
+        self._chunk_size_bytes = chunk_size_bytes
+        self._info = TtsProviderInfo(
+            provider="macos_say",
+            model_id=model_id or "say+afconvert",
+            voice_id=resolved_voice,
+            voice_name=voice_name if voice_name != "meeting-agent" else resolved_voice,
+            sample_rate=sample_rate,
+            encoding="pcm_s16le",
+        )
+
+    @property
+    def info(self) -> TtsProviderInfo:
+        return self._info
+
+    def stream_speech(self, text: str) -> Iterator[bytes]:
+        with tempfile.TemporaryDirectory(prefix="proof-tts-") as temp_dir:
+            temp_path = Path(temp_dir)
+            aiff_path = temp_path / "speech.aiff"
+            wav_path = temp_path / "speech.wav"
+            subprocess.run(
+                [
+                    "say",
+                    "-v",
+                    self.info.voice_id,
+                    "-r",
+                    str(self._speaking_rate),
+                    "-o",
+                    str(aiff_path),
+                    text,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "afconvert",
+                    str(aiff_path),
+                    "-f",
+                    "WAVE",
+                    "-d",
+                    f"LEI16@{self.info.sample_rate}",
+                    "-c",
+                    "1",
+                    str(wav_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            with wave.open(str(wav_path), "rb") as wav_file:
+                if wav_file.getnchannels() != 1 or wav_file.getsampwidth() != 2:
+                    raise RuntimeError("macos_say generated unsupported audio format")
+                frames_per_chunk = max(1, self._chunk_size_bytes // 2)
+                while True:
+                    chunk = wav_file.readframes(frames_per_chunk)
+                    if not chunk:
+                        break
+                    yield chunk
 
 
 class ElevenLabsTtsProvider:
@@ -214,12 +290,22 @@ def create_tts_provider(
     base_url: str | None,
     output_format: str,
     sample_rate: int,
+    speaking_rate: int,
     chunk_size_bytes: int,
     cartesia_version: str,
 ) -> TtsProvider:
     normalized = provider_name.strip().lower()
     if normalized == "fake":
         return FakeTtsProvider(voice_name=voice_name, sample_rate=sample_rate)
+    if normalized in {"macos_say", "macos", "say"}:
+        return MacOsSayTtsProvider(
+            voice_id=voice_id,
+            voice_name=voice_name,
+            model_id=model_id,
+            sample_rate=sample_rate,
+            speaking_rate=speaking_rate,
+            chunk_size_bytes=chunk_size_bytes,
+        )
     if normalized == "elevenlabs":
         return ElevenLabsTtsProvider(
             api_key=api_key,

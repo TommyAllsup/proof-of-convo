@@ -15,7 +15,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--provider",
-        choices=["fake", "elevenlabs", "cartesia"],
+        choices=["fake", "macos_say", "elevenlabs", "cartesia"],
         default=settings.tts_provider,
     )
     parser.add_argument("--text", default="This is a Proof of Conversation voice routing test.")
@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument("--voice-name", default=settings.tts_voice_name)
     parser.add_argument("--model-id", default=settings.tts_model)
     parser.add_argument("--sample-rate", type=int, default=settings.tts_sample_rate)
+    parser.add_argument("--speaking-rate", type=int, default=settings.tts_speaking_rate)
     parser.add_argument("--output-format", default=settings.tts_output_format)
     args = parser.parse_args()
 
@@ -37,6 +38,7 @@ def main() -> None:
         base_url=_base_url(args.provider),
         output_format=args.output_format,
         sample_rate=args.sample_rate,
+        speaking_rate=args.speaking_rate,
         chunk_size_bytes=settings.tts_chunk_size_bytes,
         cartesia_version=settings.cartesia_version,
     )

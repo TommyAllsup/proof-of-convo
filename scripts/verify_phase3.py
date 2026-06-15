@@ -32,7 +32,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--provider",
-        choices=["fake", "elevenlabs", "cartesia"],
+        choices=["fake", "macos_say", "elevenlabs", "cartesia"],
         default=settings.tts_provider,
         help="Provider to validate for credential readiness.",
     )
@@ -119,6 +119,12 @@ def _provider_check(provider: str) -> CheckResult:
             ok=True,
             detail="fake provider needs no credentials",
             required=False,
+        )
+    if normalized == "macos_say":
+        return CheckResult(
+            name="macOS local TTS tools",
+            ok=shutil.which("say") is not None and shutil.which("afconvert") is not None,
+            detail="requires built-in say and afconvert commands",
         )
     if normalized == "elevenlabs":
         ok = bool(os.getenv("ELEVENLABS_API_KEY")) and bool(settings.tts_voice_id)

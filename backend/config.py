@@ -57,6 +57,7 @@ class Settings:
     tts_voice_name: str = os.getenv("PROOF_TTS_VOICE_NAME", "meeting-agent")
     tts_output_format: str = os.getenv("PROOF_TTS_OUTPUT_FORMAT", "pcm_24000")
     tts_sample_rate: int = _env_int("PROOF_TTS_SAMPLE_RATE", 24_000)
+    tts_speaking_rate: int = _env_int("PROOF_TTS_SPEAKING_RATE", 165)
     tts_queue_max: int = _env_int("PROOF_TTS_QUEUE_MAX", 4)
     tts_output_device: str | None = os.getenv("PROOF_TTS_OUTPUT_DEVICE", "BlackHole")
     tts_playback_enabled: bool = _env_bool("PROOF_TTS_PLAYBACK_ENABLED", False)

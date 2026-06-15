@@ -150,22 +150,25 @@ curl -X POST http://127.0.0.1:8000/api/tts/speak \
 curl -X POST http://127.0.0.1:8000/api/tts/interrupt
 ```
 
-For audible Google Meet injection, install/configure BlackHole, set Google Meet's microphone to the
-BlackHole device, then enable playback and a real provider:
+For audible Google Meet injection with fully local macOS speech, install/configure BlackHole, set
+Google Meet's microphone to the BlackHole device, then enable playback and the `macos_say`
+provider:
 
 ```bash
 PROOF_TTS_ENABLED=true \
-PROOF_TTS_PROVIDER=elevenlabs \
-PROOF_TTS_MODEL=eleven_flash_v2_5 \
-PROOF_TTS_VOICE_ID=your_voice_id \
-ELEVENLABS_API_KEY=your_key \
+PROOF_TTS_PROVIDER=macos_say \
+PROOF_TTS_VOICE_ID=Samantha \
 PROOF_TTS_PLAYBACK_ENABLED=true \
-PROOF_TTS_OUTPUT_DEVICE=BlackHole \
+PROOF_TTS_OUTPUT_DEVICE="BlackHole 2ch" \
 uv run backend
 ```
 
-Cartesia can be tested with `PROOF_TTS_PROVIDER=cartesia`, `PROOF_TTS_MODEL=sonic-3`, a Cartesia
-voice ID, and `CARTESIA_API_KEY`. `/api/audio/devices` lists output devices visible to PortAudio.
+The `macos_say` provider uses built-in `say` plus `afconvert`, so it needs no cloud credentials.
+ElevenLabs and Cartesia remain available for later voice-quality comparisons. ElevenLabs can be
+tested with `PROOF_TTS_PROVIDER=elevenlabs`, `PROOF_TTS_MODEL=eleven_flash_v2_5`, a voice ID, and
+`ELEVENLABS_API_KEY`. Cartesia can be tested with `PROOF_TTS_PROVIDER=cartesia`,
+`PROOF_TTS_MODEL=sonic-3`, a Cartesia voice ID, and `CARTESIA_API_KEY`. `/api/audio/devices` lists
+output devices visible to PortAudio.
 The extension popup and sidebar include a **Voice** card with TTS health and a manual **Speak**
 button plus **Stop** control for end-to-end voice-routing tests.
 
@@ -174,7 +177,8 @@ Local playback smoke:
 ```bash
 uv run verify-phase3
 uv run test-tts-playback --provider fake --null
-uv run test-tts-playback --provider fake --device BlackHole
+uv run test-tts-playback --provider macos_say --voice-id Samantha --null
+uv run test-tts-playback --provider macos_say --voice-id Samantha --device "BlackHole 2ch"
 ```
 
 The verifier reports whether BlackHole is visible to PortAudio and whether provider credentials are
