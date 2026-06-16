@@ -8,7 +8,7 @@ from time import sleep
 
 import pytest
 
-from backend.tts.orchestrator import TtsOrchestrator
+from backend.tts.orchestrator import TtsOrchestrator, TtsSpeechResult
 from backend.tts.playback import NullAudioPlayer
 from backend.tts.providers import FakeTtsProvider, TtsProviderInfo
 
@@ -16,12 +16,14 @@ from backend.tts.providers import FakeTtsProvider, TtsProviderInfo
 @pytest.mark.asyncio
 async def test_tts_orchestrator_streams_fake_audio_to_null_player() -> None:
     player = NullAudioPlayer()
+    handled_results: list[TtsSpeechResult] = []
     tts = TtsOrchestrator(
         enabled=True,
         playback_enabled=False,
         provider=FakeTtsProvider(),
         player=player,
         queue_max=2,
+        result_handler=handled_results.append,
     )
     tts.start()
     try:
@@ -41,6 +43,7 @@ async def test_tts_orchestrator_streams_fake_audio_to_null_player() -> None:
     assert speeches[0].ttfa_ms is not None
     assert speeches[0].error is None
     assert speeches[0].dump_path is None
+    assert handled_results == speeches
 
 
 @pytest.mark.asyncio

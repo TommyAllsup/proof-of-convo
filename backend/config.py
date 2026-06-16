@@ -41,7 +41,23 @@ class Settings:
     audio_queue_max: int = _env_int("PROOF_AUDIO_QUEUE_MAX", 512)
     telemetry_enabled: bool = _env_bool("PROOF_TELEMETRY_ENABLED", True)
     telemetry_dir: Path = Path(os.getenv("PROOF_TELEMETRY_DIR", ".data/telemetry"))
+    agent_summary_dir: Path = Path(os.getenv("PROOF_AGENT_SUMMARY_DIR", ".data/agent"))
+    agent_llm_provider: str = os.getenv("PROOF_AGENT_LLM_PROVIDER", "none")
+    agent_llm_model: str = os.getenv("PROOF_AGENT_LLM_MODEL", "gpt-5.5")
+    agent_llm_base_url: str = os.getenv("PROOF_AGENT_LLM_BASE_URL", "https://api.openai.com/v1")
+    agent_llm_timeout_s: float = _env_float("PROOF_AGENT_LLM_TIMEOUT_S", 2.0)
+    agent_llm_max_output_tokens: int = _env_int("PROOF_AGENT_LLM_MAX_OUTPUT_TOKENS", 220)
+    agent_llm_reasoning_prompt_suffix: str | None = (
+        os.getenv("PROOF_AGENT_LLM_REASONING_PROMPT_SUFFIX") or None
+    )
+    agent_llm_direct_answer_prompt_suffix: str | None = (
+        os.getenv("PROOF_AGENT_LLM_DIRECT_ANSWER_PROMPT_SUFFIX") or None
+    )
+    agent_llm_context_summary_prompt_suffix: str | None = (
+        os.getenv("PROOF_AGENT_LLM_CONTEXT_SUMMARY_PROMPT_SUFFIX") or None
+    )
     vad_provider: str = os.getenv("PROOF_VAD_PROVIDER", "rms")
+    diarization_provider: str = os.getenv("PROOF_DIARIZATION_PROVIDER", "heuristic_acoustic")
     stt_enabled: bool = _env_bool("PROOF_STT_ENABLED", False)
     stt_provider: str = os.getenv("PROOF_STT_PROVIDER", "fake")
     stt_model: str | None = os.getenv("PROOF_STT_MODEL")
@@ -67,6 +83,7 @@ class Settings:
     elevenlabs_api_key: str | None = os.getenv("ELEVENLABS_API_KEY") or None
     elevenlabs_base_url: str = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io")
     cartesia_api_key: str | None = os.getenv("CARTESIA_API_KEY") or None
+    openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     cartesia_base_url: str = os.getenv(
         "CARTESIA_WS_URL",
         "wss://api.cartesia.ai/tts/websocket",

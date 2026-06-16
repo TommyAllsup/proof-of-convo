@@ -107,6 +107,7 @@ Phase 2B live STT worker:
 
 ```bash
 PROOF_VAD_PROVIDER=silero_onnx \
+PROOF_DIARIZATION_PROVIDER=heuristic_acoustic \
 PROOF_STT_ENABLED=true \
 PROOF_STT_PROVIDER=mlx_whisper \
 PROOF_STT_MODEL=mlx-community/whisper-large-v3-turbo \
@@ -115,12 +116,35 @@ uv run backend
 
 The live worker buffers recent PCM chunks, receives finalized VAD endpoint events, and runs STT in a
 separate async worker so model inference never blocks `EndpointingConsumer`. Recent transcripts are
-published as final `utterance` records with `Speaker_N` labels from the current heuristic acoustic
-diarizer. Worker health and recent utterances are exposed at:
+published as final `utterance` records with `Speaker_N` labels, diarization provider, speaker
+confidence, merge state, and optional corrected speaker labels. `PROOF_DIARIZATION_PROVIDER`
+currently supports `heuristic_acoustic` and `single_speaker`. Worker health and recent utterances
+are exposed at:
 
 ```bash
 curl http://127.0.0.1:8000/api/stt
 ```
+
+Speaker labels can be corrected for future transcript rows:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/stt/speakers/label \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"meet-session","speaker":"Speaker_1","label":"Avery"}'
+```
+
+After collecting `/api/stt` snapshots with corrected labels or reference speakers, run the
+diarization consistency benchmark:
+
+```bash
+uv run benchmark-diarization .data/phase4-live/stt-status.json \
+  --output docs/benchmarks/phase-4-diarization-consistency-2026-06-15.md \
+  --json-output docs/benchmarks/phase-4-diarization-consistency-2026-06-15.json
+```
+
+The report includes row counts, provider and merge-state counts, mean speaker confidence, a
+label-based speaker-consistency score, and an error proxy (`1 - consistency`). If no labels are
+available, it reports an unlabeled speaker-churn rate instead.
 
 `PROOF_STT_ENABLED=false` remains the default. The Phase 2B large-v3-turbo benchmark over 20 Silero
 windows processed 85.46 s of speech in 19.07 s STT wall time (RTF 0.2231), with zero errors and zero
@@ -171,6 +195,159 @@ tested with `PROOF_TTS_PROVIDER=elevenlabs`, `PROOF_TTS_MODEL=eleven_flash_v2_5`
 output devices visible to PortAudio.
 The extension popup and sidebar include a **Voice** card with TTS health and a manual **Speak**
 button plus **Stop** control for end-to-end voice-routing tests.
+
+Phase 4 Erica agent state machine:
+
+```bash
+curl http://127.0.0.1:8000/api/agent
+curl -X POST http://127.0.0.1:8000/api/agent/mode \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"assistant"}'
+curl -X POST http://127.0.0.1:8000/api/agent/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"aggressiveness":35,"proactive_min_silence_ms":1200,"direct_answer_cooldown_ms":8000}'
+curl -X POST http://127.0.0.1:8000/api/agent/meeting/begin \
+  -H 'Content-Type: application/json' \
+  -d '{"meeting_id":"manual-test","meeting_url":"https://meet.google.com/..."}'
+curl -X POST http://127.0.0.1:8000/api/agent/meeting/end \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"manual"}'
+curl -X POST http://127.0.0.1:8000/api/agent/transcript \
+  -H 'Content-Type: application/json' \
+  -d '{"speaker":"Manual","text":"Erica, what requirements are still unclear?"}'
+curl -X POST http://127.0.0.1:8000/api/agent/candidates/apply \
+  -H 'Content-Type: application/json' \
+  -d '{"candidate_id":"..."}'
+curl http://127.0.0.1:8000/api/agent/summary
+curl http://127.0.0.1:8000/api/agent/summary.md
+```
+
+Erica keeps in-memory meeting state, recent utterances, participant counts, candidate
+interventions, lightweight requirements, open questions, decisions, lifecycle state, runtime state,
+and participation mode. Direct-address phrases such as "Erica" and "Hey Erica" create
+`direct_answer` candidates. Requirement-like statements create silent clarifying-question candidates
+and requirement records. In `assistant`, `facilitator`, or `qa` mode, direct-address candidates can
+be spoken through the configured TTS path; `passive` stores candidates silently for review. Erica
+now tracks active and last TTS job IDs, moves through cooldown after speech completion, records TTS
+errors in agent status, and supports candidate dismissal. Direct-address answers are deterministic
+but contextual: they summarize the latest captured decision, requirement, and unresolved question
+instead of using a static placeholder. When `PROOF_AGENT_LLM_PROVIDER` is configured, direct-address
+answers can use the provider with deterministic fallback on errors. Ending a meeting generates an in-memory summary artifact with
+requirements, open questions, decisions, action items, risks, parked topics, candidate
+interventions, and Markdown export. Summary JSON and Markdown files are also written under
+`PROOF_AGENT_SUMMARY_DIR` (default `.data/agent`). Requirement records include deterministic
+first-pass actor, behavior, goal, constraints, priority, owner, status, and source utterance IDs for
+traceability. Common acceptance-criteria and definition-of-done phrases are captured into
+requirement records and shown in summaries and the side panel. Human open questions include related
+requirement IDs when they overlap captured requirements, while Erica's generated acceptance-criteria
+prompts stay attached to the requirement record itself. Erica also tracks the current topic from
+explicit topic transitions and requirement statements, exposes it in `/api/agent`, includes it in
+summaries, and passes it into LLM reasoning.
+
+By default `PROOF_AGENT_LLM_PROVIDER=none`, so the agent uses deterministic local logic. To let
+requirement-like utterances use a structured OpenAI reasoning call for candidate decisions, set:
+
+```bash
+PROOF_AGENT_LLM_PROVIDER=openai
+PROOF_AGENT_LLM_MODEL=gpt-5.5
+OPENAI_API_KEY=...
+```
+
+For local MLX-LM reasoning on Apple Silicon, use:
+
+```bash
+PROOF_AGENT_LLM_PROVIDER=mlx_lm
+PROOF_AGENT_LLM_MODEL=mlx-community/Qwen2.5-7B-Instruct-4bit
+```
+
+The OpenAI provider uses the Responses API with a strict JSON schema. The MLX-LM provider loads the
+local model lazily and parses the same JSON decision contract. Invalid output, timeouts, missing
+local packages, or provider errors leave Erica listening and surface `last_error` in `/api/agent`.
+Recent reasoning attempts are also available as bounded `reasoning_traces` in `/api/agent` and in
+the extension side panel for debugging actions, rationale, scores, and speech gating state. LLMs can
+propose participation mode changes as `mode_change` candidates; the side panel shows **Apply** for
+those candidates and does not change modes autonomously. The side panel also includes a **Manual
+utterance** control that posts finalized text to `/api/agent/transcript` for demos and prompt tuning
+when live STT or Meet audio is unavailable.
+
+For live prompt tuning without editing code, append deployment-specific instructions with:
+
+```bash
+PROOF_AGENT_LLM_REASONING_PROMPT_SUFFIX="Prefer one short clarification about owner or acceptance criteria."
+PROOF_AGENT_LLM_DIRECT_ANSWER_PROMPT_SUFFIX="Keep spoken answers under 30 words."
+PROOF_AGENT_LLM_CONTEXT_SUMMARY_PROMPT_SUFFIX="Mention unresolved launch or routing risks when present."
+```
+
+Phase 4 behavior eval:
+
+```bash
+uv run evaluate-agent --strict
+uv run verify-phase4 --strict
+uv run verify-phase4-live-ready --strict
+uv run verify-phase4-live-backend --strict
+uv run phase4-live-runbook --meeting-url https://meet.google.com/... --tester "$USER"
+```
+
+This feeds synthetic meeting transcripts through Erica and writes JSON/Markdown reports under
+`.data/agent-evals/`, checking requirement capture, candidate generation, dedupe, parked topics,
+risks, and context checkpoints against gold expectations. `verify-phase4` is the local preflight
+before a live Meet test; it simulates direct-address speech, spoken mode control, facilitator
+auto-speak after a silence window, structured memory, provider-call telemetry, and meeting summary
+generation in one flow. `verify-phase4-live-ready` combines that preflight with virtual audio,
+extension build, and live backend environment checks before joining Meet. `phase4-live-runbook`
+writes a machine-specific checklist with backend env, Meet setup, live checks, and evidence bundle
+commands. After launching the backend with live env flags, `verify-phase4-live-backend` checks that
+the running process reports enabled STT, TTS playback, and the expected virtual output device.
+
+After the live Meet pass, write the evidence report:
+
+```bash
+uv run phase4-live-bundle \
+  --meeting-url https://meet.google.com/... \
+  --tester "$USER" \
+  --output-dir .data/phase4-live \
+  --preflight-json .data/phase4-preflight/phase-4-preflight.json \
+  --capture-active \
+  --transcript-visible \
+  --direct-answer-audible \
+  --facilitator-auto-speak-observed \
+  --summary-generated \
+  --provider-telemetry-visible \
+  --no-feedback-loop \
+  --median-response-latency-ms 1500 \
+  --strict
+```
+
+The bundle command captures `/health`, sessions, audio consumer, agent, STT, TTS, and summary JSON
+artifacts under `.data/phase4-live/`, then writes the live-validation Markdown/JSON report under
+`docs/benchmarks/`. The lower-level commands are still available when you need to capture and report
+in separate steps:
+
+```bash
+uv run capture-phase4-snapshot \
+  --output-dir .data/phase4-live \
+  --strict
+uv run phase4-live-report \
+  --meeting-url https://meet.google.com/... \
+  --tester "$USER" \
+  --infer-from-artifacts \
+  --capture-active \
+  --transcript-visible \
+  --direct-answer-audible \
+  --facilitator-auto-speak-observed \
+  --summary-generated \
+  --provider-telemetry-visible \
+  --no-feedback-loop \
+  --median-response-latency-ms 1500 \
+  --preflight-json .data/phase4-preflight/phase-4-preflight.json \
+  --health-json .data/phase4-live/health.json \
+  --sessions-json .data/phase4-live/sessions.json \
+  --audio-consumer-json .data/phase4-live/audio_consumer.json \
+  --agent-status-json .data/phase4-live/agent_status.json \
+  --stt-status-json .data/phase4-live/stt_status.json \
+  --tts-status-json .data/phase4-live/tts_status.json \
+  --agent-summary-json .data/phase4-live/agent_summary.json
+```
 
 Local playback smoke:
 

@@ -1,17 +1,19 @@
 import {
   Activity,
   AudioLines,
+  Bot,
+  Check,
   CircleStop,
   Database,
   MessageSquareText,
   Radio,
   PanelRightOpen,
   Play,
-  Settings2,
   SlidersHorizontal,
   Volume2,
   VolumeX,
-  Waves
+  Waves,
+  X
 } from "lucide-react";
 import * as React from "react";
 
@@ -20,7 +22,14 @@ import { Card, CardContent, CardHeader } from "../components/ui/card";
 import { Slider } from "../components/ui/slider";
 import { sendRuntimeMessage } from "./chrome";
 import { startCaptureFromCurrentTab, stopCapture } from "./capture";
-import type { ParticipationMode } from "./messages";
+import type {
+  AgentStatusPayload,
+  AgentLLMCallTrace,
+  AgentReasoningTrace,
+  ParticipationMode,
+  RequirementRecord
+} from "./messages";
+import { useAgentStatus } from "./useAgentStatus";
 import { useAudioConsumerStatus } from "./useAudioConsumerStatus";
 import { useAudioDevices } from "./useAudioDevices";
 import { useRuntimeStatus } from "./useRuntimeStatus";
@@ -33,9 +42,12 @@ interface ControlPanelProps {
 }
 
 const modeLabels: Record<ParticipationMode, string> = {
+  off: "Off",
   passive: "Passive",
-  active: "Active",
-  qa: "Q&A"
+  assistant: "Assistant",
+  facilitator: "Facilitator",
+  qa: "Q&A",
+  scribe: "Scribe"
 };
 
 export function ControlPanel({ surface }: ControlPanelProps) {
@@ -45,15 +57,22 @@ export function ControlPanel({ surface }: ControlPanelProps) {
   const devices = useAudioDevices(settings.backendWsUrl);
   const stt = useSttStatus(settings.backendWsUrl);
   const tts = useTtsStatus(settings.backendWsUrl);
+  const agent = useAgentStatus(settings.backendWsUrl);
   const [busy, setBusy] = React.useState(false);
   const [localError, setLocalError] = React.useState<string | undefined>();
   const [speakText, setSpeakText] = React.useState("Thanks. I have one clarifying question: what decision do we need before the next step?");
+  const [manualSpeaker, setManualSpeaker] = React.useState("Manual");
+  const [manualUtterance, setManualUtterance] = React.useState("Erica, what requirements are still unclear?");
+  const [speakerLabelDrafts, setSpeakerLabelDrafts] = React.useState<Record<string, string>>({});
 
   const isStreaming = status.captureState === "streaming";
   const isBusy = busy || status.captureState === "starting" || status.captureState === "stopping";
   const level = Math.min(100, Math.round((status.clientRms ?? status.rms ?? 0) * 420));
   const outputDevice = tts.status?.stats.output_device;
   const outputVisible = isOutputDeviceVisible(devices.status, outputDevice);
+  const agentStatus = normalizeAgentStatus(agent.status);
+  const recentTranscripts = stt.status?.recent_transcripts ?? [];
+  const recentEndpointEvents = consumer.status?.recent_endpoint_events ?? [];
 
   async function runAction(action: () => Promise<unknown>): Promise<void> {
     setBusy(true);
@@ -159,26 +178,93 @@ export function ControlPanel({ surface }: ControlPanelProps) {
 
             <div className="grid grid-cols-2 gap-2 text-xs">
               <Metric label="STT" value={stt.status?.stats.provider ?? "--"} />
-              <Metric label="Speaker" value="heuristic" />
+              <Metric label="Speaker" value={stt.status?.stats.diarization_provider ?? "--"} />
             </div>
 
             <div className="rounded-md border border-border bg-background">
               <div className="border-b border-border px-3 py-2 text-xs font-medium">Recent utterances</div>
               <div className="max-h-52 overflow-auto">
-                {stt.status?.recent_transcripts.length ? (
-                  stt.status.recent_transcripts
+                {recentTranscripts.length ? (
+                  recentTranscripts
                     .slice()
                     .reverse()
                     .slice(0, surface === "popup" ? 4 : 10)
-                    .map((item) => (
-                      <div className="border-b border-border px-3 py-2 last:border-b-0" key={item.utterance.utterance_id}>
-                        <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                          <span className="font-medium text-foreground">{item.utterance.speaker}</span>
-                          <span>{formatTranscriptTime(item.utterance.start_ms)}</span>
+                    .map((item) => {
+                      const speakerLabel = item.utterance.speaker_label ?? item.speaker.speaker_label ?? null;
+                      const speakerName = speakerLabel ?? item.utterance.speaker ?? item.speaker.speaker ?? "Speaker";
+                      const labelKey = `${item.utterance.session_id ?? "session"}:${item.utterance.speaker ?? item.speaker.speaker ?? "speaker"}`;
+                      const labelDraft = speakerLabelDrafts[labelKey] ?? speakerLabel ?? "";
+                      return (
+                        <div className="border-b border-border px-3 py-2 last:border-b-0" key={item.utterance.utterance_id}>
+                          <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                            <span className="min-w-0 truncate font-medium text-foreground" title={item.utterance.speaker}>
+                              {speakerName}
+                            </span>
+                            <span>{formatTranscriptTime(item.utterance.start_ms)}</span>
+                          </div>
+                          <div className="mb-1 text-[10px] text-muted-foreground">
+                            {[
+                              item.speaker.provider ?? item.speaker.method ?? "speaker",
+                              item.speaker.merge_state ?? "unmerged",
+                              formatConfidence(item.speaker.confidence)
+                            ].join(" / ")}
+                          </div>
+                          {surface === "sidepanel" ? (
+                            <div className="mb-2 flex gap-1">
+                              <input
+                                className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] outline-none focus:border-primary"
+                                value={labelDraft}
+                                onChange={(event) =>
+                                  setSpeakerLabelDrafts((drafts) => ({
+                                    ...drafts,
+                                    [labelKey]: event.currentTarget.value
+                                  }))
+                                }
+                                placeholder={item.utterance.speaker}
+                              />
+                              <Button
+                                aria-label="Save speaker label"
+                                className="h-7 w-7 px-0"
+                                disabled={isBusy}
+                                onClick={() =>
+                                  runAction(() =>
+                                    stt.setSpeakerLabel(
+                                      item.utterance.session_id,
+                                      item.utterance.speaker ?? item.speaker.speaker,
+                                      labelDraft.trim() || null
+                                    )
+                                  )
+                                }
+                              >
+                                <Check className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                aria-label="Clear speaker label"
+                                className="h-7 w-7 px-0"
+                                variant="secondary"
+                                disabled={isBusy || !speakerLabel}
+                                onClick={() =>
+                                  runAction(async () => {
+                                    await stt.setSpeakerLabel(
+                                      item.utterance.session_id,
+                                      item.utterance.speaker ?? item.speaker.speaker,
+                                      null
+                                    );
+                                    setSpeakerLabelDrafts((drafts) => ({
+                                      ...drafts,
+                                      [labelKey]: ""
+                                    }));
+                                  })
+                                }
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          ) : null}
+                          <p className="text-xs leading-5 text-foreground">{item.utterance.text || "[empty]"}</p>
                         </div>
-                        <p className="text-xs leading-5 text-foreground">{item.utterance.text || "[empty]"}</p>
-                      </div>
-                    ))
+                      );
+                    })
                 ) : (
                   <div className="px-3 py-3 text-xs text-muted-foreground">Waiting for final transcripts</div>
                 )}
@@ -288,8 +374,8 @@ export function ControlPanel({ surface }: ControlPanelProps) {
                 Recent endpoints
               </div>
               <div className="max-h-32 overflow-auto">
-                {consumer.status?.recent_endpoint_events.length ? (
-                  consumer.status.recent_endpoint_events
+                {recentEndpointEvents.length ? (
+                  recentEndpointEvents
                     .slice()
                     .reverse()
                     .slice(0, 6)
@@ -299,7 +385,7 @@ export function ControlPanel({ surface }: ControlPanelProps) {
                         key={`${event.session_id}-${event.sequence}-${event.type}`}
                       >
                         <span className="font-medium">{event.type.replace("_", " ")}</span>
-                        <span className="truncate text-muted-foreground">{event.session_id.slice(0, 8)}</span>
+                        <span className="truncate text-muted-foreground">{(event.session_id ?? "session").slice(0, 8)}</span>
                         <span className="text-right text-muted-foreground">#{event.sequence}</span>
                       </div>
                     ))
@@ -315,24 +401,245 @@ export function ControlPanel({ surface }: ControlPanelProps) {
 
         <Card>
           <CardHeader className="flex flex-row items-center gap-2 text-sm font-medium">
-            <Settings2 className="h-4 w-4 text-primary" />
-            Agent Mode
+            <Bot className="h-4 w-4 text-primary" />
+            Erica
           </CardHeader>
           <CardContent className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Metric label="Lifecycle" value={formatState(agent.status?.status.lifecycle_state)} />
+              <Metric label="Runtime" value={formatState(agent.status?.status.runtime_state)} />
+              <Metric
+                label="Auto speak"
+                value={agentStatus.readiness.can_auto_speak ? "ready" : "blocked"}
+              />
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Metric label="Candidates" value={formatCount(agentStatus.candidate_interventions.length)} />
+              <Metric label="Reqs" value={formatCount(agentStatus.requirements.length)} />
+              <Metric label="Questions" value={formatCount(agentStatus.open_questions.length)} />
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Metric label="Decisions" value={formatCount(agentStatus.decisions.length)} />
+              <Metric label="Actions" value={formatCount(agentStatus.action_items.length)} />
+              <Metric label="Risks" value={formatCount(agentStatus.risks.length)} />
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Metric label="Parked" value={formatCount(agentStatus.parked_topics.length)} />
+              <Metric label="Topic" value={agentStatus.current_topic?.topic ?? "--"} />
+              <Metric
+                label="Summary"
+                value={agentStatus.latest_summary ? "ready" : "not ready"}
+              />
+            </div>
+
             <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-muted p-1">
-              {(Object.keys(modeLabels) as ParticipationMode[]).map((mode) => (
+              {(["off", "passive", "assistant", "facilitator", "qa", "scribe"] as ParticipationMode[]).map((mode) => (
                 <button
                   key={mode}
                   className={
-                    settings.participationMode === mode
+                    agent.status?.status.mode === mode
                       ? "rounded-md bg-white px-2 py-1.5 text-xs font-medium shadow-sm"
                       : "rounded-md px-2 py-1.5 text-xs text-muted-foreground"
                   }
-                  onClick={() => updateSettings({ participationMode: mode })}
+                  onClick={() => runAction(() => agent.setMode(mode))}
                 >
                   {modeLabels[mode]}
                 </button>
               ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                disabled={isBusy || agentStatus.lifecycle_state === "in_meeting"}
+                onClick={() => runAction(() => agent.beginMeeting(status.meetingUrl))}
+              >
+                <Play className="h-4 w-4" />
+                Begin
+              </Button>
+              <Button
+                variant="danger"
+                disabled={isBusy || agentStatus.lifecycle_state !== "in_meeting"}
+                onClick={() => runAction(agent.endMeeting)}
+              >
+                <CircleStop className="h-4 w-4" />
+                End
+              </Button>
+            </div>
+
+            <div className="space-y-2 rounded-md border border-border bg-background p-3">
+              <div className="flex items-center gap-2 text-xs font-medium">
+                <MessageSquareText className="h-3.5 w-3.5 text-primary" />
+                Manual utterance
+              </div>
+              <input
+                className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none focus:border-primary"
+                value={manualSpeaker}
+                onChange={(event) => setManualSpeaker(event.currentTarget.value)}
+                placeholder="Speaker"
+              />
+              <textarea
+                className="min-h-20 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-xs leading-5 outline-none focus:border-primary"
+                value={manualUtterance}
+                onChange={(event) => setManualUtterance(event.currentTarget.value)}
+                placeholder="Type a finalized utterance for Erica to observe"
+              />
+              <Button
+                className="w-full"
+                variant="secondary"
+                disabled={isBusy || !manualUtterance.trim()}
+                onClick={() =>
+                  runAction(() =>
+                    agent.injectTranscript(
+                      manualUtterance.trim(),
+                      manualSpeaker.trim() || "Manual",
+                      status.sessionId
+                    )
+                  )
+                }
+              >
+                <MessageSquareText className="h-4 w-4" />
+                Inject
+              </Button>
+            </div>
+
+            {agentStatus.latest_summary ? (
+              <a
+                className="block rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-primary"
+                href={agent.summaryMarkdownUrl}
+                rel="noreferrer"
+                target="_blank"
+              >
+                Open meeting summary
+              </a>
+            ) : null}
+
+            <div className="rounded-md border border-border bg-background">
+              <div className="border-b border-border px-3 py-2 text-xs font-medium">Requirements</div>
+              <div className="max-h-44 overflow-auto">
+                {agentStatus.requirements.length ? (
+                  agentStatus.requirements
+                    .slice()
+                    .reverse()
+                    .slice(0, surface === "popup" ? 2 : 6)
+                    .map((requirement) => (
+                      <div className="space-y-1 border-b border-border px-3 py-2 last:border-b-0" key={requirement.requirement_id}>
+                        <p className="text-xs leading-5 text-foreground">{requirement.text}</p>
+                        <p className="text-[11px] leading-4 text-muted-foreground">
+                          {formatRequirementDetails(requirement)}
+                        </p>
+                      </div>
+                    ))
+                ) : (
+                  <div className="px-3 py-3 text-xs text-muted-foreground">No requirements yet</div>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3">
+              <CompactRecordList
+                emptyText="No open questions yet"
+                items={agentStatus.open_questions.map(formatOpenQuestion)}
+                title="Open questions"
+              />
+              <CompactRecordList
+                emptyText="No decisions yet"
+                items={agentStatus.decisions.map(formatDecision)}
+                title="Decisions"
+              />
+              <CompactRecordList
+                emptyText="No action items yet"
+                items={agentStatus.action_items.map(formatActionItem)}
+                title="Action items"
+              />
+            </div>
+
+            <div className="rounded-md border border-border bg-background">
+              <div className="border-b border-border px-3 py-2 text-xs font-medium">Candidate interventions</div>
+              <div className="max-h-40 overflow-auto">
+                {agentStatus.candidate_interventions.length ? (
+                  agentStatus.candidate_interventions
+                    .slice()
+                    .reverse()
+                    .slice(0, surface === "popup" ? 2 : 5)
+                    .map((candidate) => (
+                      <div className="space-y-2 border-b border-border px-3 py-2 last:border-b-0" key={candidate.candidate_id}>
+                        <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                          <span className="font-medium text-foreground">{candidate.type.replace("_", " ")}</span>
+                          <span>
+                            {candidate.suggested_mode ? `${modeLabels[candidate.suggested_mode]} · ` : ""}
+                            {Math.round(candidate.score * 100)}%
+                          </span>
+                        </div>
+                        <p className="text-xs leading-5 text-foreground">{candidate.text}</p>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] text-muted-foreground">{candidate.reason}</span>
+                          <div className="flex gap-1">
+                            {candidate.type === "mode_change" ? (
+                              <Button
+                                disabled={isBusy || !candidate.suggested_mode}
+                                onClick={() => runAction(() => agent.applyCandidate(candidate.candidate_id))}
+                              >
+                                Apply
+                              </Button>
+                            ) : (
+                              <Button
+                                disabled={isBusy || !tts.status?.stats.running}
+                                onClick={() => runAction(() => agent.speakCandidate(candidate.candidate_id))}
+                              >
+                                <Volume2 className="h-4 w-4" />
+                                Speak
+                              </Button>
+                            )}
+                            <Button
+                              variant="secondary"
+                              disabled={isBusy}
+                              onClick={() => runAction(() => agent.dismissCandidate(candidate.candidate_id))}
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                ) : (
+                  <div className="px-3 py-3 text-xs text-muted-foreground">No candidates yet</div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border bg-background">
+              <div className="border-b border-border px-3 py-2 text-xs font-medium">Reasoning</div>
+              <div className="max-h-40 overflow-auto">
+                {agentStatus.reasoning_traces.length ? (
+                  agentStatus.reasoning_traces
+                    .slice()
+                    .reverse()
+                    .slice(0, surface === "popup" ? 2 : 5)
+                    .map((trace) => (
+                      <ReasoningTraceRow trace={trace} key={trace.trace_id} />
+                    ))
+                ) : (
+                  <div className="px-3 py-3 text-xs text-muted-foreground">No reasoning traces yet</div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border bg-background">
+              <div className="border-b border-border px-3 py-2 text-xs font-medium">Provider calls</div>
+              <div className="max-h-36 overflow-auto">
+                {agentStatus.llm_call_traces.length ? (
+                  agentStatus.llm_call_traces
+                    .slice()
+                    .reverse()
+                    .slice(0, surface === "popup" ? 2 : 5)
+                    .map((trace) => <LLMCallTraceRow trace={trace} key={trace.trace_id} />)
+                ) : (
+                  <div className="px-3 py-3 text-xs text-muted-foreground">No provider calls yet</div>
+                )}
+              </div>
             </div>
 
             <label className="block space-y-2">
@@ -341,16 +648,69 @@ export function ControlPanel({ surface }: ControlPanelProps) {
                   <SlidersHorizontal className="h-3.5 w-3.5" />
                   Aggressiveness
                 </span>
-                <span>{settings.aggressiveness}%</span>
+                <span>{agentStatus.settings.aggressiveness}%</span>
               </div>
               <Slider
                 min={0}
                 max={100}
                 step={5}
-                value={settings.aggressiveness}
-                onChange={(event) => updateSettings({ aggressiveness: Number(event.currentTarget.value) })}
+                value={agentStatus.settings.aggressiveness}
+                onChange={(event) => {
+                  const aggressiveness = Number(event.currentTarget.value);
+                  updateSettings({ aggressiveness });
+                  void runAction(() => agent.setAggressiveness(aggressiveness));
+                }}
               />
             </label>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <label className="block space-y-1">
+                <span className="text-muted-foreground">Silence gap (s)</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 outline-none focus:border-primary"
+                  min={0}
+                  max={30}
+                  step={0.1}
+                  type="number"
+                  value={formatSeconds(agentStatus.settings.proactive_min_silence_ms)}
+                  onChange={(event) => {
+                    const proactive_min_silence_ms = Number(event.currentTarget.value) * 1000;
+                    const aggressiveness = agentStatus.settings.aggressiveness;
+                    void runAction(() =>
+                      agent.setPolicy({ aggressiveness, proactive_min_silence_ms })
+                    );
+                  }}
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-muted-foreground">Cooldown (s)</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 outline-none focus:border-primary"
+                  min={0}
+                  max={120}
+                  step={0.5}
+                  type="number"
+                  value={formatSeconds(agentStatus.settings.direct_answer_cooldown_ms)}
+                  onChange={(event) => {
+                    const direct_answer_cooldown_ms = Number(event.currentTarget.value) * 1000;
+                    const aggressiveness = agentStatus.settings.aggressiveness;
+                    void runAction(() =>
+                      agent.setPolicy({ aggressiveness, direct_answer_cooldown_ms })
+                    );
+                  }}
+                />
+              </label>
+            </div>
+
+            <StatusLine text={agent.error ?? agent.status?.status.last_error ?? agent.endpointUrl} danger={Boolean(agent.error || agent.status?.status.last_error)} />
+            <StatusLine
+              text={
+                agentStatus.readiness.blockers.length
+                  ? `Auto-speak blocked: ${agentStatus.readiness.blockers.join(", ")}`
+                  : undefined
+              }
+              danger
+            />
 
             <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
               <span className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -371,6 +731,49 @@ export function ControlPanel({ surface }: ControlPanelProps) {
   );
 }
 
+function ReasoningTraceRow({ trace }: { trace: AgentReasoningTrace }) {
+  const label = trace.error ? "error" : trace.action?.replaceAll("_", " ") ?? "decision";
+  const detail = trace.error ?? trace.reason ?? "No rationale captured";
+  return (
+    <div className="space-y-1 border-b border-border px-3 py-2 last:border-b-0">
+      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span className={trace.error ? "font-medium text-danger" : "font-medium text-foreground"}>
+          {label}
+        </span>
+        <span>{trace.score == null ? "--" : `${Math.round(trace.score * 100)}%`}</span>
+      </div>
+      <p className="text-xs leading-5 text-foreground">{detail}</p>
+      <p className="text-[11px] leading-4 text-muted-foreground">
+        {[
+          trace.candidate_type?.replaceAll("_", " "),
+          trace.suggested_mode ? `mode: ${modeLabels[trace.suggested_mode]}` : undefined,
+          trace.can_auto_speak ? "auto ready" : "manual",
+          trace.cooldown_allows_speech ? "cooldown clear" : "cooldown",
+          `${trace.recent_utterance_count} utt`
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      </p>
+    </div>
+  );
+}
+
+function LLMCallTraceRow({ trace }: { trace: AgentLLMCallTrace }) {
+  const detail = trace.error ?? trace.output_preview ?? trace.input_preview ?? "No preview captured";
+  return (
+    <div className="space-y-1 border-b border-border px-3 py-2 last:border-b-0">
+      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span className={trace.success ? "font-medium text-foreground" : "font-medium text-danger"}>
+          {trace.operation.replaceAll("_", " ")}
+        </span>
+        <span>{Math.round(trace.latency_ms)}ms</span>
+      </div>
+      <p className="text-xs leading-5 text-foreground">{detail}</p>
+      <p className="text-[11px] leading-4 text-muted-foreground">{trace.provider}</p>
+    </div>
+  );
+}
+
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border border-border bg-background px-2 py-2">
@@ -378,6 +781,121 @@ function Metric({ label, value }: { label: string; value: string }) {
       <div className="truncate text-sm font-semibold">{value}</div>
     </div>
   );
+}
+
+function normalizeAgentStatus(payload: AgentStatusPayload | undefined): AgentStatusPayload["status"] {
+  const status = payload?.status;
+  return {
+    name: status?.name ?? "Erica",
+    mode: status?.mode ?? "passive",
+    lifecycle_state: status?.lifecycle_state ?? "not_in_meeting",
+    runtime_state: status?.runtime_state ?? "idle_listening",
+    meeting_id: status?.meeting_id ?? null,
+    meeting_url: status?.meeting_url ?? null,
+    recent_utterances: status?.recent_utterances ?? [],
+    participants: status?.participants ?? [],
+    requirements: status?.requirements ?? [],
+    open_questions: status?.open_questions ?? [],
+    decisions: status?.decisions ?? [],
+    action_items: status?.action_items ?? [],
+    risks: status?.risks ?? [],
+    parked_topics: status?.parked_topics ?? [],
+    context_summaries: status?.context_summaries ?? [],
+    current_topic: status?.current_topic ?? null,
+    candidate_interventions: status?.candidate_interventions ?? [],
+    reasoning_traces: status?.reasoning_traces ?? [],
+    llm_call_traces: status?.llm_call_traces ?? [],
+    latest_summary: status?.latest_summary ?? null,
+    settings: {
+      aggressiveness: status?.settings?.aggressiveness ?? 25,
+      direct_answer_cooldown_ms: status?.settings?.direct_answer_cooldown_ms ?? 8_000,
+      proactive_min_silence_ms: status?.settings?.proactive_min_silence_ms ?? 1_200
+    },
+    readiness: {
+      can_auto_speak: status?.readiness?.can_auto_speak ?? false,
+      blockers: status?.readiness?.blockers ?? ["agent status is still loading"]
+    },
+    active_speech_job_id: status?.active_speech_job_id ?? null,
+    last_speech_job_id: status?.last_speech_job_id ?? null,
+    last_agent_speech_at_ms: status?.last_agent_speech_at_ms ?? null,
+    last_human_speech_at_ms: status?.last_human_speech_at_ms ?? null,
+    last_state_change_at_ms: status?.last_state_change_at_ms ?? Date.now(),
+    last_error: status?.last_error ?? null
+  };
+}
+
+function CompactRecordList({
+  emptyText,
+  items,
+  title
+}: {
+  emptyText: string;
+  items: string[];
+  title: string;
+}) {
+  return (
+    <div className="rounded-md border border-border bg-background">
+      <div className="border-b border-border px-3 py-2 text-xs font-medium">{title}</div>
+      <div className="max-h-32 overflow-auto">
+        {items.length ? (
+          items
+            .slice()
+            .reverse()
+            .slice(0, 5)
+            .map((item, index) => (
+              <div className="border-b border-border px-3 py-2 text-xs leading-5 last:border-b-0" key={`${item}-${index}`}>
+                {item}
+              </div>
+            ))
+        ) : (
+          <div className="px-3 py-3 text-xs text-muted-foreground">{emptyText}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatRequirementDetails(requirement: RequirementRecord): string {
+  const constraints = requirement.constraints ?? [];
+  const acceptanceCriteria = requirement.acceptance_criteria ?? [];
+  const details = [
+    requirement.actor ? `actor: ${requirement.actor}` : undefined,
+    requirement.behavior ? `behavior: ${requirement.behavior}` : undefined,
+    requirement.goal ? `goal: ${requirement.goal}` : undefined,
+    requirement.priority !== "unknown" ? `priority: ${requirement.priority}` : undefined,
+    requirement.owner ? `owner: ${requirement.owner}` : undefined,
+    requirement.status !== "proposed" ? `status: ${requirement.status}` : undefined,
+    constraints.length ? `constraints: ${constraints.join(", ")}` : undefined,
+    acceptanceCriteria.length
+      ? `acceptance: ${acceptanceCriteria.join(", ")}`
+      : undefined
+  ].filter(Boolean);
+  return details.length ? details.join(" · ") : "details pending";
+}
+
+function formatOpenQuestion(question: import("./messages").OpenQuestionRecord): string {
+  const status = question.answered ? "answered" : "open";
+  const relatedRequirementIds = question.related_requirement_ids ?? [];
+  if (!relatedRequirementIds.length) {
+    return `${question.text} · ${status}`;
+  }
+  const suffix =
+    relatedRequirementIds.length === 1
+      ? "1 linked requirement"
+      : `${relatedRequirementIds.length} linked requirements`;
+  return `${question.text} · ${status} · ${suffix}`;
+}
+
+function formatDecision(decision: import("./messages").DecisionRecord): string {
+  return `${decision.text} · ${decision.confirmed ? "confirmed" : "unconfirmed"}`;
+}
+
+function formatActionItem(actionItem: import("./messages").ActionItemRecord): string {
+  const details = [
+    actionItem.completed ? "completed" : "open",
+    actionItem.owner ? `owner: ${actionItem.owner}` : undefined
+  ].filter(Boolean);
+  return `${actionItem.text} · ${details.join(" · ")}`;
 }
 
 function StatusLine({ text, danger = false }: { text: string | undefined; danger?: boolean }) {
@@ -423,11 +941,25 @@ function formatNumber(value: number | undefined): string {
   return value.toFixed(3);
 }
 
+function formatSeconds(valueMs: number | undefined): string {
+  if (valueMs === undefined) {
+    return "0";
+  }
+  return String(Math.round((valueMs / 1000) * 10) / 10);
+}
+
 function formatCount(value: number | undefined): string {
   if (value == null) {
     return "--";
   }
   return value.toLocaleString();
+}
+
+function formatConfidence(value: number | null | undefined): string {
+  if (value == null) {
+    return "--";
+  }
+  return `${Math.round(value * 100)}%`;
 }
 
 function formatRelativeMs(value: number | null | undefined): string {
@@ -456,4 +988,11 @@ function formatTranscriptTime(valueMs: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatState(value: string | undefined): string {
+  if (!value) {
+    return "--";
+  }
+  return value.replaceAll("_", " ");
 }

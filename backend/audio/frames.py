@@ -81,9 +81,9 @@ def parse_audio_packet(message: bytes) -> AudioPacket:
             sample_count,
             source_id,
         ) = HEADER_STRUCT_V2.unpack_from(message, 0)
-        source = SOURCE_IDS.get(source_id)
-        if source is None:
+        if source_id not in SOURCE_IDS:
             raise AudioPacketError(f"unknown audio source id: {source_id}")
+        source = SOURCE_IDS[source_id]
     else:
         raise AudioPacketError(f"unsupported audio packet version: {version}")
 

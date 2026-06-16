@@ -24,7 +24,9 @@ async def test_live_stt_orchestrator_transcribes_endpoint_job() -> None:
         buffer_history_ms=5_000,
         pre_roll_ms=100,
         post_roll_ms=100,
+        diarization_provider_name="single_speaker",
     )
+    orchestrator.set_speaker_label(session_id="session-1", speaker="Speaker_1", label="Avery")
     orchestrator.start()
 
     for sequence in range(5):
@@ -60,6 +62,7 @@ async def test_live_stt_orchestrator_transcribes_endpoint_job() -> None:
     assert stats.enqueued_jobs == 1
     assert stats.completed_transcripts == 1
     assert stats.processing_errors == 0
+    assert stats.diarization_provider == "single_speaker"
     recent = orchestrator.recent_transcripts()
     assert len(recent) == 1
     assert recent[0].window.vad_provider == "rms"
@@ -67,9 +70,20 @@ async def test_live_stt_orchestrator_transcribes_endpoint_job() -> None:
     assert recent[0].window.padded_end_ms == 700.0
     assert recent[0].transcript.provider == "fake"
     assert recent[0].speaker.speaker == "Speaker_1"
+    assert recent[0].speaker.speaker_label == "Avery"
+    assert recent[0].speaker.provider == "single_speaker"
+    assert recent[0].speaker.merge_state == "fixed"
     assert recent[0].utterance.speaker == "Speaker_1"
+    assert recent[0].utterance.speaker_label == "Avery"
+    assert recent[0].utterance.diarization_provider == "single_speaker"
+    assert recent[0].utterance.speaker_merge_state == "fixed"
     assert recent[0].utterance.text.startswith("[fake transcript")
     assert recent[0].utterance.is_final is True
+
+    orchestrator.set_speaker_label(session_id="session-1", speaker="Speaker_1", label="Morgan")
+    labeled = orchestrator.recent_transcripts()
+    assert labeled[0].speaker.speaker_label == "Morgan"
+    assert labeled[0].utterance.speaker_label == "Morgan"
 
 
 def test_audio_window_buffer_aligns_capture_clock_segments_to_chunk_clock() -> None:

@@ -6,6 +6,7 @@ import json
 import signal
 import time
 import uuid
+from contextlib import suppress
 
 import sounddevice as sd
 import websockets
@@ -30,19 +31,19 @@ async def capture_local_mic(
         stop_event.set()
 
     for signame in ("SIGINT", "SIGTERM"):
-        try:
+        with suppress(NotImplementedError):
             loop.add_signal_handler(getattr(signal, signame), stop)
-        except NotImplementedError:
-            pass
 
-    def callback(indata: bytes, frames: int, _time, status: sd.CallbackFlags) -> None:
+    def enqueue_payload(payload: bytes) -> None:
+        with suppress(asyncio.QueueFull):
+            queue.put_nowait(payload)
+
+    def callback(indata: bytes, frames: int, _time: object, status: sd.CallbackFlags) -> None:
+        _ = frames
         if status:
             print(f"mic callback status: {status}", flush=True)
         payload = bytes(indata)
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, payload)
-        except asyncio.QueueFull:
-            pass
+        loop.call_soon_threadsafe(enqueue_payload, payload)
 
     blocksize = sample_rate * chunk_ms // 1000
     async with websockets.connect(url, max_size=None) as websocket:

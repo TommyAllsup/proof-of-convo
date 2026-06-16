@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -14,6 +15,22 @@ class SpeakerAttribution:
     speaker: str
     confidence: float
     method: str
+    provider: str = "heuristic_acoustic"
+    merge_state: str = "unknown"
+    speaker_label: str | None = None
+
+
+class DiarizationProvider(Protocol):
+    name: str
+
+    def assign(
+        self,
+        *,
+        window: UtteranceWindow,
+        audio: NDArray[np.float32],
+    ) -> SpeakerAttribution: ...
+
+    def set_speaker_label(self, *, session_id: str, speaker: str, label: str | None) -> None: ...
 
 
 @dataclass
@@ -36,6 +53,7 @@ class HeuristicSpeakerDiarizer:
     def __init__(self, *, distance_threshold: float = 0.35) -> None:
         self._distance_threshold = distance_threshold
         self._speakers: dict[str, list[_SpeakerCentroid]] = {}
+        self._speaker_labels: dict[tuple[str, str], str] = {}
 
     def assign(
         self,
@@ -48,7 +66,12 @@ class HeuristicSpeakerDiarizer:
         if not centroids:
             centroid = _SpeakerCentroid(speaker="Speaker_1", vector=vector)
             centroids.append(centroid)
-            return SpeakerAttribution(speaker=centroid.speaker, confidence=0.60, method=self.name)
+            return self._attribution(
+                session_id=window.session_id,
+                speaker=centroid.speaker,
+                confidence=0.60,
+                merge_state="new",
+            )
 
         distances = [float(np.linalg.norm(vector - centroid.vector)) for centroid in centroids]
         best_index = int(np.argmin(np.array(distances)))
@@ -56,7 +79,12 @@ class HeuristicSpeakerDiarizer:
         if best_distance > self._distance_threshold and len(centroids) < 8:
             speaker = f"Speaker_{len(centroids) + 1}"
             centroids.append(_SpeakerCentroid(speaker=speaker, vector=vector))
-            return SpeakerAttribution(speaker=speaker, confidence=0.45, method=self.name)
+            return self._attribution(
+                session_id=window.session_id,
+                speaker=speaker,
+                confidence=0.45,
+                merge_state="new",
+            )
 
         centroid = centroids[best_index]
         centroid.samples += 1
@@ -66,11 +94,83 @@ class HeuristicSpeakerDiarizer:
             0.25,
             min(0.95, 1.0 - best_distance / max(self._distance_threshold, 0.001)),
         )
-        return SpeakerAttribution(
+        return self._attribution(
+            session_id=window.session_id,
             speaker=centroid.speaker,
             confidence=confidence,
-            method=self.name,
+            merge_state="matched",
         )
+
+    def set_speaker_label(self, *, session_id: str, speaker: str, label: str | None) -> None:
+        key = (session_id, speaker)
+        cleaned = label.strip() if label else None
+        if cleaned:
+            self._speaker_labels[key] = cleaned
+        else:
+            self._speaker_labels.pop(key, None)
+
+    def _attribution(
+        self,
+        *,
+        session_id: str,
+        speaker: str,
+        confidence: float,
+        merge_state: str,
+    ) -> SpeakerAttribution:
+        return SpeakerAttribution(
+            speaker=speaker,
+            confidence=confidence,
+            method=self.name,
+            provider=self.name,
+            merge_state=merge_state,
+            speaker_label=self._speaker_labels.get((session_id, speaker)),
+        )
+
+
+class SingleSpeakerDiarizer:
+    """Deterministic provider for one-speaker local tests and capture smoke runs."""
+
+    name = "single_speaker"
+
+    def __init__(self) -> None:
+        self._speaker_labels: dict[tuple[str, str], str] = {}
+
+    def assign(
+        self,
+        *,
+        window: UtteranceWindow,
+        audio: NDArray[np.float32],
+    ) -> SpeakerAttribution:
+        _ = audio
+        speaker = "Speaker_1"
+        return SpeakerAttribution(
+            speaker=speaker,
+            confidence=1.0,
+            method=self.name,
+            provider=self.name,
+            merge_state="fixed",
+            speaker_label=self._speaker_labels.get((window.session_id, speaker)),
+        )
+
+    def set_speaker_label(self, *, session_id: str, speaker: str, label: str | None) -> None:
+        key = (session_id, speaker)
+        cleaned = label.strip() if label else None
+        if cleaned:
+            self._speaker_labels[key] = cleaned
+        else:
+            self._speaker_labels.pop(key, None)
+
+
+def create_diarization_provider(name: str) -> DiarizationProvider:
+    normalized = name.strip().lower()
+    if normalized in {"heuristic", "heuristic_acoustic"}:
+        return HeuristicSpeakerDiarizer()
+    if normalized in {"single", "single_speaker"}:
+        return SingleSpeakerDiarizer()
+    raise ValueError(
+        f"Unsupported diarization provider '{name}'. "
+        "Supported providers: heuristic_acoustic, single_speaker."
+    )
 
 
 def _feature_vector(

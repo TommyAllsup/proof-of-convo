@@ -85,6 +85,12 @@ class ErrorEvent(BaseModel):
     received_at_ms: float
 
 
+class SpeakerLabelRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    speaker: str = Field(min_length=1)
+    label: str | None = None
+
+
 class Utterance(BaseModel):
     type: Literal["utterance"] = "utterance"
     utterance_id: str = Field(min_length=1)
@@ -98,6 +104,9 @@ class Utterance(BaseModel):
     is_final: bool = True
     confidence: float | None = None
     speaker_confidence: float | None = None
+    speaker_label: str | None = None
+    diarization_provider: str | None = None
+    speaker_merge_state: str | None = None
     stt_provider: str
     stt_model: str
     vad_provider: str

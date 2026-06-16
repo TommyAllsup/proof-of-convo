@@ -7,17 +7,42 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
+from backend.agent import MeetingAgentOrchestrator, create_llm_client
 from backend.audio.consumer import EndpointingConsumer
+from backend.audio.diarization import SpeakerAttribution
 from backend.audio.endpointing import EndpointEvent
 from backend.audio.frames import AudioPacketError, parse_audio_packet
 from backend.audio.live_stt import LiveSttOrchestrator, LiveTranscript
 from backend.audio.manager import AudioStreamManager, now_ms
+from backend.audio.stt import SttTranscript
+from backend.audio.stt_windows import UtteranceWindow
 from backend.config import settings
-from backend.models.audio import ClientPing, ErrorEvent, SessionAck, SessionStart, SessionStop
+from backend.models.agent import (
+    AgentApplyCandidateRequest,
+    AgentBeginMeetingRequest,
+    AgentDismissCandidateRequest,
+    AgentEndMeetingRequest,
+    AgentInjectTranscriptRequest,
+    AgentLifecycleResponse,
+    AgentModeRequest,
+    AgentReadiness,
+    AgentSettings,
+    AgentSettingsRequest,
+    AgentSpeakCandidateRequest,
+)
+from backend.models.audio import (
+    ClientPing,
+    ErrorEvent,
+    SessionAck,
+    SessionStart,
+    SessionStop,
+    SpeakerLabelRequest,
+    Utterance,
+)
 from backend.models.tts import TtsInterruptResponse, TtsSpeakRequest, TtsSpeakResponse
 from backend.tts import TtsOrchestrator, create_audio_player, create_tts_provider
 from backend.tts.orchestrator import TtsSpeechResult
@@ -58,16 +83,19 @@ manager = AudioStreamManager(
     telemetry_dir=settings.telemetry_dir,
     telemetry_enabled=settings.telemetry_enabled,
 )
-live_stt = LiveSttOrchestrator(
-    enabled=settings.stt_enabled,
-    provider_name=settings.stt_provider,
-    model_id=settings.stt_model,
-    language=settings.stt_language,
-    vad_provider_name=settings.vad_provider,
-    queue_max=settings.stt_queue_max,
-    buffer_history_ms=settings.stt_buffer_history_ms,
-    pre_roll_ms=settings.stt_pre_roll_ms,
-    post_roll_ms=settings.stt_post_roll_ms,
+agent = MeetingAgentOrchestrator(
+    summary_dir=settings.agent_summary_dir,
+    llm_client=create_llm_client(
+        settings.agent_llm_provider,
+        api_key=settings.openai_api_key,
+        model=settings.agent_llm_model,
+        base_url=settings.agent_llm_base_url,
+        timeout_s=settings.agent_llm_timeout_s,
+        max_output_tokens=settings.agent_llm_max_output_tokens,
+        reasoning_prompt_suffix=settings.agent_llm_reasoning_prompt_suffix,
+        direct_answer_prompt_suffix=settings.agent_llm_direct_answer_prompt_suffix,
+        context_summary_prompt_suffix=settings.agent_llm_context_summary_prompt_suffix,
+    ),
 )
 tts_provider = create_tts_provider(
     settings.tts_provider,
@@ -93,13 +121,36 @@ tts = TtsOrchestrator(
     queue_max=settings.tts_queue_max,
     dump_dir=settings.tts_dump_dir,
     dump_enabled=settings.tts_dump_enabled,
+    result_handler=lambda result: agent.observe_speech_result(
+        job_id=result.job_id,
+        completed_at_ms=result.completed_at_ms,
+        error=result.error,
+        interrupted=result.interrupted,
+    ),
+)
+live_stt = LiveSttOrchestrator(
+    enabled=settings.stt_enabled,
+    provider_name=settings.stt_provider,
+    model_id=settings.stt_model,
+    language=settings.stt_language,
+    vad_provider_name=settings.vad_provider,
+    diarization_provider_name=settings.diarization_provider,
+    queue_max=settings.stt_queue_max,
+    buffer_history_ms=settings.stt_buffer_history_ms,
+    pre_roll_ms=settings.stt_pre_roll_ms,
+    post_roll_ms=settings.stt_post_roll_ms,
+    transcript_handler=lambda transcript: agent.observe_transcript(transcript, speaker=tts),
 )
 
 
 def _handle_endpoint_event(event: EndpointEvent) -> None:
     live_stt.handle_endpoint(event)
+    _refresh_agent_readiness()
     if event.type == "speech_start":
+        agent.observe_human_speech_start(event.event_ms)
         tts.interrupt_current(reason="human_speech")
+    elif event.type == "speech_end":
+        agent.observe_silence(event.event_ms, speaker=tts)
 
 
 audio_consumer = EndpointingConsumer(
@@ -147,6 +198,7 @@ async def health() -> dict[str, Any]:
         "audio_consumer": asdict(audio_consumer.stats()),
         "stt_worker": asdict(live_stt.stats()),
         "tts_worker": asdict(tts.stats()),
+        "agent": _agent_status_payload(),
     }
 
 
@@ -182,6 +234,21 @@ async def stt_status() -> dict[str, Any]:
     }
 
 
+@app.post("/api/stt/speakers/label")
+async def label_stt_speaker(request: SpeakerLabelRequest) -> dict[str, Any]:
+    live_stt.set_speaker_label(
+        session_id=request.session_id,
+        speaker=request.speaker,
+        label=request.label,
+    )
+    return {
+        "ok": True,
+        "session_id": request.session_id,
+        "speaker": request.speaker,
+        "label": request.label.strip() if request.label else None,
+    }
+
+
 def _live_transcript_payload(item: LiveTranscript) -> dict[str, Any]:
     return {
         "completed_at_ms": item.completed_at_ms,
@@ -198,6 +265,108 @@ async def tts_status() -> dict[str, Any]:
         "stats": asdict(tts.stats()),
         "recent_speeches": [_tts_speech_payload(item) for item in tts.recent_speeches()],
     }
+
+
+@app.get("/api/agent")
+async def agent_status() -> dict[str, Any]:
+    return {"status": _agent_status_payload()}
+
+
+@app.post("/api/agent/mode")
+async def set_agent_mode(request: AgentModeRequest) -> AgentLifecycleResponse:
+    return AgentLifecycleResponse(status=agent.set_mode(request.mode))
+
+
+@app.post("/api/agent/settings")
+async def set_agent_settings(request: AgentSettingsRequest) -> AgentLifecycleResponse:
+    current = agent.status().settings
+    return AgentLifecycleResponse(
+        status=agent.set_settings(
+            AgentSettings(
+                aggressiveness=request.aggressiveness,
+                direct_answer_cooldown_ms=(
+                    request.direct_answer_cooldown_ms
+                    if request.direct_answer_cooldown_ms is not None
+                    else current.direct_answer_cooldown_ms
+                ),
+                proactive_min_silence_ms=(
+                    request.proactive_min_silence_ms
+                    if request.proactive_min_silence_ms is not None
+                    else current.proactive_min_silence_ms
+                ),
+            )
+        )
+    )
+
+
+@app.post("/api/agent/meeting/begin")
+async def begin_agent_meeting(request: AgentBeginMeetingRequest) -> AgentLifecycleResponse:
+    return AgentLifecycleResponse(status=agent.begin_meeting(request))
+
+
+@app.post("/api/agent/meeting/end")
+async def end_agent_meeting(_: AgentEndMeetingRequest) -> AgentLifecycleResponse:
+    return AgentLifecycleResponse(status=agent.end_meeting())
+
+
+@app.get("/api/agent/summary")
+async def agent_summary() -> dict[str, Any]:
+    summary = agent.latest_summary()
+    if summary is None:
+        raise HTTPException(status_code=404, detail="summary not available")
+    return {"summary": summary.model_dump(mode="json")}
+
+
+@app.get("/api/agent/summary.md")
+async def agent_summary_markdown() -> Response:
+    summary = agent.latest_summary()
+    if summary is None:
+        raise HTTPException(status_code=404, detail="summary not available")
+    return Response(content=summary.markdown, media_type="text/markdown")
+
+
+@app.post("/api/agent/candidates/speak")
+async def speak_agent_candidate(request: AgentSpeakCandidateRequest) -> AgentLifecycleResponse:
+    candidate = agent.speak_candidate(
+        request.candidate_id,
+        speaker=tts,
+        interrupt=request.interrupt,
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    return AgentLifecycleResponse(status=agent.status())
+
+
+@app.post("/api/agent/candidates/dismiss")
+async def dismiss_agent_candidate(
+    request: AgentDismissCandidateRequest,
+) -> AgentLifecycleResponse:
+    candidate = agent.dismiss_candidate(request.candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    return AgentLifecycleResponse(status=agent.status())
+
+
+@app.post("/api/agent/candidates/apply")
+async def apply_agent_candidate(request: AgentApplyCandidateRequest) -> AgentLifecycleResponse:
+    candidate = agent.apply_candidate(request.candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="candidate not applicable")
+    return AgentLifecycleResponse(status=agent.status())
+
+
+@app.post("/api/agent/transcript")
+async def inject_agent_transcript(request: AgentInjectTranscriptRequest) -> AgentLifecycleResponse:
+    if agent.status().lifecycle_state == "not_in_meeting":
+        agent.begin_meeting(
+            AgentBeginMeetingRequest(
+                meeting_id=request.session_id or "manual-agent-session",
+                meeting_url="manual://agent-transcript",
+            )
+        )
+    transcript = _manual_live_transcript(request)
+    agent.observe_transcript(transcript, speaker=tts)
+    return AgentLifecycleResponse(status=agent.status())
 
 
 @app.post("/api/tts/speak")
@@ -232,6 +401,108 @@ def _tts_speech_payload(item: TtsSpeechResult) -> dict[str, Any]:
     return asdict(item)
 
 
+def _manual_live_transcript(request: AgentInjectTranscriptRequest) -> LiveTranscript:
+    current_ms = now_ms()
+    start_ms = request.start_ms if request.start_ms is not None else current_ms
+    end_ms = request.end_ms if request.end_ms is not None else start_ms + 750.0
+    if end_ms < start_ms:
+        raise HTTPException(
+            status_code=422,
+            detail="end_ms must be greater than or equal to start_ms",
+        )
+
+    status = agent.status()
+    session_id = request.session_id or status.meeting_id or "manual-agent-session"
+    utterance_id = request.utterance_id or f"manual-{int(current_ms)}"
+    source = "manual://agent-transcript"
+    duration_ms = end_ms - start_ms
+    window = UtteranceWindow(
+        window_id=utterance_id,
+        session_id=session_id,
+        source_wav=source,
+        sample_rate=16_000,
+        vad_provider="manual",
+        start_ms=start_ms,
+        end_ms=end_ms,
+        duration_ms=duration_ms,
+        padded_start_ms=start_ms,
+        padded_end_ms=end_ms,
+        padded_duration_ms=duration_ms,
+        start_sequence=0,
+        end_sequence=0,
+        peak=0.0,
+        mean_rms=0.0,
+    )
+    stt_transcript = SttTranscript(
+        window_id=utterance_id,
+        provider="manual",
+        model_id="manual",
+        text=request.text,
+        language="en",
+        confidence=request.confidence,
+        wall_time_s=0.0,
+    )
+    utterance = Utterance(
+        utterance_id=utterance_id,
+        session_id=session_id,
+        speaker=request.speaker,
+        start_ts=start_ms / 1000.0,
+        end_ts=end_ms / 1000.0,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        text=request.text,
+        is_final=True,
+        confidence=request.confidence,
+        speaker_confidence=1.0,
+        stt_provider="manual",
+        stt_model="manual",
+        vad_provider="manual",
+        raw_audio_ref=source,
+    )
+    return LiveTranscript(
+        window=window,
+        transcript=stt_transcript,
+        speaker=SpeakerAttribution(speaker=request.speaker, confidence=1.0, method="manual"),
+        utterance=utterance,
+        completed_at_ms=current_ms,
+    )
+
+
+def _agent_status_payload() -> dict[str, Any]:
+    _refresh_agent_readiness()
+    return agent.status().model_dump(mode="json")
+
+
+def _refresh_agent_readiness() -> None:
+    blockers: list[str] = []
+    if not manager.list_sessions():
+        blockers.append("capture inactive")
+
+    consumer_stats = audio_consumer.stats()
+    if not consumer_stats.running:
+        blockers.append("audio consumer stopped")
+    if consumer_stats.last_error is not None:
+        blockers.append("audio consumer error")
+
+    stt_stats = live_stt.stats()
+    if not stt_stats.enabled:
+        blockers.append("stt disabled")
+    elif not stt_stats.running:
+        blockers.append("stt stopped")
+    if stt_stats.last_error is not None:
+        blockers.append("stt error")
+
+    tts_stats = tts.stats()
+    if not tts_stats.enabled:
+        blockers.append("tts disabled")
+    elif not tts_stats.running:
+        blockers.append("tts stopped")
+    if tts_stats.last_error is not None:
+        blockers.append("tts error")
+
+    agent.set_readiness(AgentReadiness(can_auto_speak=not blockers, blockers=blockers))
+
+
 async def _send_error(websocket: WebSocket, message: str) -> None:
     event = ErrorEvent(message=message, received_at_ms=now_ms())
     await websocket.send_text(event.model_dump_json())
@@ -264,6 +535,7 @@ async def _handle_text_message(
             stats.sample_rate,
             stats.meeting_url,
         )
+        agent.observe_session_start(session_id=start.session_id, meeting_url=start.meeting_url)
         ack = SessionAck(
             session_id=start.session_id,
             received_at_ms=received_at_ms,
@@ -289,6 +561,7 @@ async def _handle_text_message(
             stop_stats.total_chunks if stop_stats else None,
             stop_stats.dropped_chunks if stop_stats else None,
         )
+        agent.observe_session_stop()
         await websocket.send_text(
             json.dumps(
                 {
@@ -379,6 +652,7 @@ async def audio_websocket(websocket: WebSocket) -> None:
     finally:
         if session_id is not None:
             manager.stop_session(session_id, reason="websocket_disconnect")
+            agent.observe_session_stop()
         logger.info("audio_ws_disconnect client=%s session_id=%s", websocket.client, session_id)
 
 

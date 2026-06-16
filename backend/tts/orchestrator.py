@@ -7,6 +7,7 @@ import time
 import uuid
 import wave
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,6 +86,7 @@ class TtsOrchestrator:
         queue_max: int,
         dump_dir: Path | None = None,
         dump_enabled: bool = False,
+        result_handler: Callable[[TtsSpeechResult], None] | None = None,
     ) -> None:
         self.enabled = enabled
         self.playback_enabled = playback_enabled
@@ -108,6 +110,7 @@ class TtsOrchestrator:
         self._last_completed_at_ms: float | None = None
         self._last_ttfa_ms: float | None = None
         self._last_error: str | None = None
+        self._result_handler = result_handler
 
     @property
     def running(self) -> bool:
@@ -148,6 +151,8 @@ class TtsOrchestrator:
                 self._last_ttfa_ms = result.ttfa_ms
                 self._total_audio_bytes += result.audio_bytes
                 self._recent_speeches.append(result)
+                if self._result_handler is not None:
+                    self._result_handler(result)
             except Exception as exc:  # noqa: BLE001 - keep live worker running.
                 self._processing_errors += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"

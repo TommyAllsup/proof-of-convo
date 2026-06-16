@@ -5,10 +5,15 @@ import hashlib
 import logging
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from backend.audio.diarization import HeuristicSpeakerDiarizer, SpeakerAttribution
+from backend.audio.diarization import (
+    DiarizationProvider,
+    SpeakerAttribution,
+    create_diarization_provider,
+)
 from backend.audio.endpointing import EndpointEvent, SpeechSegment
 from backend.audio.frames import pcm16_to_float32
 from backend.audio.manager import AudioChunkEvent, now_ms
@@ -40,6 +45,7 @@ class LiveSttStats:
     running: bool
     provider: str
     model_id: str
+    diarization_provider: str
     model_load_time_s: float | None
     queued_jobs: int
     enqueued_jobs: int
@@ -195,6 +201,9 @@ class LiveSttOrchestrator:
         pre_roll_ms: float,
         post_roll_ms: float,
         provider: SttProvider | None = None,
+        diarizer: DiarizationProvider | None = None,
+        diarization_provider_name: str = "heuristic_acoustic",
+        transcript_handler: Callable[[LiveTranscript], None] | None = None,
     ) -> None:
         self.enabled = enabled
         self._provider = provider or create_stt_provider(
@@ -205,9 +214,10 @@ class LiveSttOrchestrator:
         self._vad_provider_name = vad_provider_name
         self._queue: asyncio.Queue[LiveSttJob] = asyncio.Queue(maxsize=queue_max)
         self._buffer = AudioWindowBuffer(max_history_ms=buffer_history_ms)
-        self._diarizer = HeuristicSpeakerDiarizer()
+        self._diarizer = diarizer or create_diarization_provider(diarization_provider_name)
         self._pre_roll_ms = pre_roll_ms
         self._post_roll_ms = post_roll_ms
+        self._transcript_handler = transcript_handler
         self._task: asyncio.Task[None] | None = None
         self._worker_thread_prepared = False
         self._recent_transcripts: deque[LiveTranscript] = deque(maxlen=100)
@@ -252,15 +262,16 @@ class LiveSttOrchestrator:
                     self._last_error = transcript.error
                 self._completed_transcripts += 1
                 self._last_completed_at_ms = now_ms()
-                self._recent_transcripts.append(
-                    LiveTranscript(
-                        window=job.window,
-                        transcript=transcript,
-                        speaker=speaker,
-                        utterance=utterance,
-                        completed_at_ms=self._last_completed_at_ms,
-                    )
+                live_transcript = LiveTranscript(
+                    window=job.window,
+                    transcript=transcript,
+                    speaker=speaker,
+                    utterance=utterance,
+                    completed_at_ms=self._last_completed_at_ms,
                 )
+                self._recent_transcripts.append(live_transcript)
+                if self._transcript_handler is not None:
+                    self._transcript_handler(live_transcript)
             except Exception as exc:  # noqa: BLE001 - keep live worker running.
                 self._processing_errors += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
@@ -300,6 +311,7 @@ class LiveSttOrchestrator:
             running=self.running,
             provider=self._provider.name,
             model_id=self._provider.model_info.model_id,
+            diarization_provider=self._diarizer.name,
             model_load_time_s=self._model_load_time_s,
             queued_jobs=self._queue.qsize(),
             enqueued_jobs=self._enqueued_jobs,
@@ -314,6 +326,19 @@ class LiveSttOrchestrator:
     def recent_transcripts(self) -> list[LiveTranscript]:
         return list(self._recent_transcripts)
 
+    def set_speaker_label(self, *, session_id: str, speaker: str, label: str | None) -> None:
+        self._diarizer.set_speaker_label(session_id=session_id, speaker=speaker, label=label)
+        cleaned = label.strip() if label else None
+        self._recent_transcripts = deque(
+            (
+                _with_speaker_label(item, speaker=speaker, label=cleaned)
+                if item.utterance.session_id == session_id and item.utterance.speaker == speaker
+                else item
+                for item in self._recent_transcripts
+            ),
+            maxlen=self._recent_transcripts.maxlen,
+        )
+
     def _transcribe_job_sync(self, job: LiveSttJob) -> tuple[SttTranscript, Any]:
         if not self._worker_thread_prepared:
             self._model_load_time_s = self._provider.prepare()
@@ -323,7 +348,14 @@ class LiveSttOrchestrator:
 
     def _speaker_for_window(self, window: UtteranceWindow, audio: Any) -> SpeakerAttribution:
         if window.session_id.endswith(":mic"):
-            return SpeakerAttribution(speaker="You", confidence=1.0, method="source_local_mic")
+            return SpeakerAttribution(
+                speaker="You",
+                confidence=1.0,
+                method="source_local_mic",
+                provider="source",
+                merge_state="fixed",
+                speaker_label="You",
+            )
         return self._diarizer.assign(window=window, audio=audio)
 
 
@@ -417,8 +449,40 @@ def _utterance_from_transcript(
         is_final=True,
         confidence=transcript.confidence,
         speaker_confidence=speaker.confidence,
+        speaker_label=speaker.speaker_label,
+        diarization_provider=speaker.provider,
+        speaker_merge_state=speaker.merge_state,
         stt_provider=transcript.provider,
         stt_model=transcript.model_id,
         vad_provider=window.vad_provider,
         raw_audio_ref=window.source_wav,
+    )
+
+
+def _with_speaker_label(
+    item: LiveTranscript,
+    *,
+    speaker: str,
+    label: str | None,
+) -> LiveTranscript:
+    updated_speaker = SpeakerAttribution(
+        speaker=item.speaker.speaker,
+        confidence=item.speaker.confidence,
+        method=item.speaker.method,
+        provider=item.speaker.provider,
+        merge_state=item.speaker.merge_state,
+        speaker_label=label if item.speaker.speaker == speaker else item.speaker.speaker_label,
+    )
+    return LiveTranscript(
+        window=item.window,
+        transcript=item.transcript,
+        speaker=updated_speaker,
+        utterance=item.utterance.model_copy(
+            update={
+                "speaker_label": (
+                    label if item.utterance.speaker == speaker else item.utterance.speaker_label
+                )
+            }
+        ),
+        completed_at_ms=item.completed_at_ms,
     )

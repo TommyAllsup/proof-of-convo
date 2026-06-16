@@ -8,6 +8,7 @@ dependencies = [
   "fastapi>=0.115.0",
   "langgraph>=0.2.0",
   "mlx>=0.26.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx-lm>=0.22.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "mlx-whisper>=0.4.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "numpy>=2.0.0",
   "onnxruntime>=1.20.0",
@@ -35,8 +36,17 @@ send-test-audio = "scripts.send_test_audio:main"
 check-audio-devices = "scripts.check_audio_devices:main"
 benchmark-vad = "scripts.benchmark_vad:main"
 benchmark-stt = "scripts.benchmark_stt:main"
+benchmark-diarization = "scripts.benchmark_diarization:main"
 test-tts-playback = "scripts.test_tts_playback:main"
 verify-phase3 = "scripts.verify_phase3:main"
+evaluate-agent = "scripts.evaluate_agent:main"
+verify-phase4 = "scripts.verify_phase4:main"
+verify-phase4-live-ready = "scripts.verify_phase4_live_ready:main"
+verify-phase4-live-backend = "scripts.verify_phase4_live_backend:main"
+phase4-live-report = "scripts.phase4_live_report:main"
+phase4-live-bundle = "scripts.phase4_live_bundle:main"
+phase4-live-runbook = "scripts.phase4_live_runbook:main"
+capture-phase4-snapshot = "scripts.capture_phase4_snapshot:main"
 
 [build-system]
 requires = ["hatchling"]

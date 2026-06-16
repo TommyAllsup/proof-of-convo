@@ -1,6 +1,22 @@
 export type CaptureState = "idle" | "starting" | "streaming" | "stopping" | "error";
 export type BackendState = "disconnected" | "connecting" | "connected" | "buffering" | "error";
-export type ParticipationMode = "passive" | "active" | "qa";
+export type ParticipationMode = "off" | "passive" | "assistant" | "facilitator" | "qa" | "scribe";
+export type MeetingLifecycleState =
+  | "not_in_meeting"
+  | "joining_meeting"
+  | "meeting_started"
+  | "in_meeting"
+  | "ending_meeting"
+  | "meeting_ended";
+export type AgentRuntimeState =
+  | "idle_listening"
+  | "candidate_intervention"
+  | "waiting_for_turn"
+  | "thinking"
+  | "speaking"
+  | "interrupted"
+  | "cooldown"
+  | "manual_override";
 
 export interface RuntimeStatus {
   captureState: CaptureState;
@@ -60,6 +76,7 @@ export interface SttWorkerStats {
   running: boolean;
   provider: string;
   model_id: string;
+  diarization_provider?: string;
   model_load_time_s: number | null;
   queued_jobs: number;
   enqueued_jobs: number;
@@ -83,7 +100,10 @@ export interface UtteranceEvent {
   text: string;
   is_final: boolean;
   confidence: number | null;
-  speaker_confidence: number | null;
+  speaker_confidence?: number | null;
+  speaker_label?: string | null;
+  diarization_provider?: string | null;
+  speaker_merge_state?: string | null;
   stt_provider: string;
   stt_model: string;
   vad_provider: string;
@@ -97,6 +117,9 @@ export interface SttTranscriptItem {
     speaker: string;
     confidence: number;
     method: string;
+    provider?: string;
+    merge_state?: string;
+    speaker_label?: string | null;
   };
   transcript: {
     window_id: string;
@@ -177,6 +200,227 @@ export interface AudioDevicesStatus {
   ok: boolean;
   error?: string;
   output_devices: AudioOutputDevice[];
+}
+
+export interface AgentUtterance {
+  utterance_id: string;
+  session_id: string;
+  speaker: string;
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  received_at_ms: number;
+}
+
+export interface ParticipantState {
+  speaker: string;
+  utterance_count: number;
+  last_heard_at_ms: number | null;
+}
+
+export interface AgentCandidateIntervention {
+  candidate_id: string;
+  type:
+    | "direct_answer"
+    | "clarifying_question"
+    | "gap_detection"
+    | "conflict_detection"
+    | "decision_capture"
+    | "scope_control"
+    | "summary_checkpoint"
+    | "mode_change";
+  text: string;
+  score: number;
+  speak_allowed: boolean;
+  reason: string;
+  source_utterance_id: string | null;
+  suggested_mode: ParticipationMode | null;
+  created_at_ms: number;
+}
+
+export interface AgentReasoningTrace {
+  trace_id: string;
+  utterance_id: string;
+  action:
+    | "listen"
+    | "draft_candidate"
+    | "speak_now"
+    | "summarize"
+    | "capture_decision"
+    | "ask_clarifying_question"
+    | "suggest_mode_change"
+    | null;
+  candidate_type: AgentCandidateIntervention["type"] | null;
+  score: number | null;
+  reason: string | null;
+  suggested_mode: ParticipationMode | null;
+  error: string | null;
+  created_at_ms: number;
+  mode: ParticipationMode;
+  runtime_state: AgentRuntimeState;
+  can_auto_speak: boolean;
+  cooldown_allows_speech: boolean;
+  context_summary_count: number;
+  recent_utterance_count: number;
+}
+
+export interface AgentLLMCallTrace {
+  trace_id: string;
+  operation: "reasoning" | "direct_answer" | "context_summary";
+  provider: string;
+  success: boolean;
+  latency_ms: number;
+  error: string | null;
+  input_preview: string | null;
+  output_preview: string | null;
+  created_at_ms: number;
+}
+
+export interface RequirementRecord {
+  requirement_id: string;
+  text: string;
+  source_utterance_id: string;
+  source_utterance_ids: string[];
+  speaker: string;
+  created_at_ms: number;
+  actor: string | null;
+  goal: string | null;
+  behavior: string | null;
+  constraints: string[];
+  priority: "unknown" | "low" | "medium" | "high";
+  owner: string | null;
+  status: "proposed" | "clarifying" | "accepted" | "deferred";
+  acceptance_criteria: string[];
+  open_questions: string[];
+}
+
+export interface OpenQuestionRecord {
+  question_id: string;
+  text: string;
+  source_utterance_id: string;
+  source_utterance_ids: string[];
+  speaker: string;
+  created_at_ms: number;
+  answered: boolean;
+  related_requirement_ids: string[];
+}
+
+export interface DecisionRecord {
+  decision_id: string;
+  text: string;
+  source_utterance_id: string;
+  source_utterance_ids: string[];
+  speaker: string;
+  created_at_ms: number;
+  confirmed: boolean;
+}
+
+export interface ActionItemRecord {
+  action_item_id: string;
+  text: string;
+  source_utterance_id: string;
+  source_utterance_ids: string[];
+  speaker: string;
+  created_at_ms: number;
+  owner: string | null;
+  completed: boolean;
+}
+
+export interface RiskRecord {
+  risk_id: string;
+  text: string;
+  source_utterance_id: string;
+  source_utterance_ids: string[];
+  speaker: string;
+  created_at_ms: number;
+  severity: string;
+  mitigated: boolean;
+}
+
+export interface ParkedTopicRecord {
+  parked_topic_id: string;
+  text: string;
+  source_utterance_id: string;
+  source_utterance_ids: string[];
+  speaker: string;
+  created_at_ms: number;
+  revisited: boolean;
+}
+
+export interface MeetingContextSummary {
+  summary_id: string;
+  start_utterance_id: string;
+  end_utterance_id: string;
+  generated_at_ms: number;
+  utterance_count: number;
+  text: string;
+  topics: string[];
+}
+
+export interface CurrentTopicState {
+  topic: string;
+  source_utterance_id: string;
+  updated_at_ms: number;
+}
+
+export interface MeetingSummaryArtifact {
+  meeting_id: string | null;
+  meeting_url: string | null;
+  generated_at_ms: number;
+  utterance_count: number;
+  participant_count: number;
+  requirements: RequirementRecord[];
+  open_questions: OpenQuestionRecord[];
+  decisions: DecisionRecord[];
+  action_items: ActionItemRecord[];
+  risks: RiskRecord[];
+  parked_topics: ParkedTopicRecord[];
+  context_summaries: MeetingContextSummary[];
+  current_topic: CurrentTopicState | null;
+  candidate_interventions: AgentCandidateIntervention[];
+  markdown: string;
+  json_path: string | null;
+  markdown_path: string | null;
+}
+
+export interface AgentStatusPayload {
+  status: {
+    name: string;
+    mode: ParticipationMode;
+    lifecycle_state: MeetingLifecycleState;
+    runtime_state: AgentRuntimeState;
+    meeting_id: string | null;
+    meeting_url: string | null;
+    recent_utterances: AgentUtterance[];
+    participants: ParticipantState[];
+    requirements: RequirementRecord[];
+    open_questions: OpenQuestionRecord[];
+    decisions: DecisionRecord[];
+    action_items: ActionItemRecord[];
+    risks: RiskRecord[];
+    parked_topics: ParkedTopicRecord[];
+    context_summaries: MeetingContextSummary[];
+    current_topic: CurrentTopicState | null;
+  candidate_interventions: AgentCandidateIntervention[];
+  reasoning_traces: AgentReasoningTrace[];
+  llm_call_traces: AgentLLMCallTrace[];
+  latest_summary: MeetingSummaryArtifact | null;
+    settings: {
+      aggressiveness: number;
+      direct_answer_cooldown_ms: number;
+      proactive_min_silence_ms: number;
+    };
+    readiness: {
+      can_auto_speak: boolean;
+      blockers: string[];
+    };
+    active_speech_job_id: string | null;
+    last_speech_job_id: string | null;
+    last_agent_speech_at_ms: number | null;
+    last_human_speech_at_ms: number | null;
+    last_state_change_at_ms: number;
+    last_error: string | null;
+  };
 }
 
 export interface UiSettings {
